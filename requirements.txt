@@ -1,0 +1,10 @@
+jupyter
+numpy
+scipy
+matplotlib
+pandas
+networkx
+lightning
+torch
+torchvision
+scikit-learn
