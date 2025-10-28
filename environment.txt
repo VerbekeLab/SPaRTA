@@ -1,0 +1,7 @@
+conda create -n SPaRTA_env python=3.12 jupyter numpy scipy matplotlib
+conda activate SPaRTA_env     
+conda install pandas
+conda install networkx
+conda install lightning -c conda-forge
+pip3 install torch torchvision
+conda install scikit-learn
