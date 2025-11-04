@@ -51,7 +51,7 @@ def construct_network_ibm(type_dataset='HI-Small'):
     labels = define_ML_labels_ibm(transactions)
     return G, labels
 
-def construct_network_ibm_time(start_date, end_date, type_dataset='HI-Small'):
+def load_network_ibm_time(start_date, end_date, type_dataset='HI-Small'):
     transactions = load_transactions_ibm(type_dataset=type_dataset)
     transactions_time_filtered = transactions[
         (transactions['Timestamp'] >= start_date) & 
@@ -60,3 +60,10 @@ def construct_network_ibm_time(start_date, end_date, type_dataset='HI-Small'):
     G = load_network_ibm(transactions_time_filtered)
     labels = define_ML_labels_ibm(transactions_time_filtered)
     return G, labels
+
+def construct_network_ibm_time(start_dates, end_dates, type_dataset='HI-Small'):
+    networks = []
+    for start_date, end_date in zip(start_dates, end_dates):
+        G, labels = load_network_ibm_time(start_date, end_date, type_dataset=type_dataset)
+        networks.append((G, labels))
+    return networks
