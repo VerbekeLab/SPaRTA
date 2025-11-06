@@ -100,9 +100,12 @@ if __name__ == "__main__":
                     "size_21": size_21_list,
                     "size_22": size_22_list
                 })
-                out_path = f"results/{type_dataset}_dynamic_{i}.csv"
-                df.to_csv(out_path, index=False)
-                print(f"Results saved to {out_path}")
+                out_path_features = f"results/{type_dataset}_dynamic_{i}_features.csv"
+                df.to_csv(out_path_features, index=False)
+                print(f"Results saved to {out_path_features}")
+                out_path_labels = f"results/{type_dataset}_dynamic_{i}_labels.csv"
+                labels.to_csv(out_path_labels)
+                print(f"Labels saved to {out_path_labels}")
 
 
         else:
@@ -149,9 +152,12 @@ if __name__ == "__main__":
                 "size_21": size_21_list,
                 "size_22": size_22_list
             })
-            out_path = f"results/{type_dataset}_static.csv"
-            df.to_csv(out_path, index=False)
-            print(f"Results saved to {out_path}")
+            out_path_features = f"results/{type_dataset}_static_features.csv"
+            df.to_csv(out_path_features, index=False)
+            print(f"Results saved to {out_path_features}")
+            out_path_labels = f"results/{type_dataset}_static_labels.csv"
+            labels.to_csv(out_path_labels)
+            print(f"Labels saved to {out_path_labels}")
 
     else:
         pass
