@@ -3,14 +3,14 @@ import torch
 from src.methods.utils.measure_functions import *
 from src.methods.utils.neighbourhood_functions import *
 
-def node_measures(node, G_copy, G_copy_und, G_copy_rev, output_tensor = True):
+def node_measures(node, G_copy, G_copy_und, G_copy_rev, output_tensor = True, weight=None):
     G_ego_second_und = nx.ego_graph(G_copy_und, node, radius=2)
     G_ego_second = nx.subgraph(G_copy, G_ego_second_und.nodes)
     G_ego_second_rev = nx.ego_graph(G_copy_rev, node, 2)
 
     nodes_0, nodes_1, nodes_2, nodes_ordered = node_selection(G_ego_second, G_ego_second_und, G_ego_second_rev, node)
 
-    adj_full = nx.adjacency_matrix(G_ego_second, nodelist=nodes_ordered, weight=None).toarray()
+    adj_full = nx.adjacency_matrix(G_ego_second, nodelist=nodes_ordered, weight=weight).toarray()
 
     size_0 = len(nodes_0)
     size_1 = len(nodes_1)

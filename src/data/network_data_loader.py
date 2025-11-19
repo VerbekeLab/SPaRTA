@@ -2,6 +2,8 @@ import numpy as np
 import pandas as pd
 import networkx as nx
 
+from .utils.dates import exponential_time_decay
+
 def load_transactions_ibm(type_dataset='HI-Small'):
     dtype = {
                 'Timestamp': 'object',
@@ -21,17 +23,18 @@ def load_transactions_ibm(type_dataset='HI-Small'):
         f'./data/IBM/{type_dataset}_Trans.csv',
         dtype=dtype
     )
+    transactions = transactions[transactions['Account'] != transactions['Account.1']]
     transactions['Timestamp'] = pd.to_datetime(transactions['Timestamp'], format='%Y/%m/%d %H:%M')
     transactions = transactions[transactions['Timestamp'] <= '2022-09-11']
     return transactions
 
-def load_network_ibm(transactions):
+def load_network_ibm(transactions, weight = 'Amount Paid'):
     G = nx.DiGraph()
     for idx, row in transactions.iterrows():
         from_account = row['Account']
         to_account = row['Account.1']
-        amount = row['Amount Paid']
-        G.add_edge(from_account, to_account, weight=amount, timestamp=row['Timestamp'])
+        amount = row[weight]
+        G.add_edge(from_account, to_account, weight=amount)
     return G
 
 def define_ML_labels_ibm(transactions):
@@ -51,19 +54,44 @@ def construct_network_ibm(type_dataset='HI-Small'):
     labels = define_ML_labels_ibm(transactions)
     return G, labels
 
-def load_network_ibm_time(start_date, end_date, type_dataset='HI-Small'):
+
+
+def load_network_ibm_time(start_date, end_date, type_dataset='HI-Small', echo=False, days_echo=3):
     transactions = load_transactions_ibm(type_dataset=type_dataset)
-    transactions_time_filtered = transactions[
-        (transactions['Timestamp'] >= start_date) & 
-        (transactions['Timestamp'] < end_date)
-    ]
-    G = load_network_ibm(transactions_time_filtered)
-    labels = define_ML_labels_ibm(transactions_time_filtered)
+    
+    if echo:
+        start_date = end_date - np.timedelta64(days_echo, 'D')
+        transactions_time_filtered = transactions[
+            (transactions['Timestamp'] >= start_date) & 
+            (transactions['Timestamp'] < end_date)
+        ]
+        
+        transactions_time_filtered['decay'] = transactions_time_filtered['Timestamp'].apply(
+            lambda x: exponential_time_decay(x, end_date, days_echo=days_echo)
+        )
+        
+
+        transactions_time_decay = transactions_time_filtered[[
+            'Account', 'Account.1', 'decay'
+            ]].groupby(['Account', 'Account.1']).max().reset_index()
+        
+        G = load_network_ibm(transactions_time_decay, weight='decay')
+
+        transactions_time_filtered['Is Laundering'] = transactions_time_filtered['Is Laundering']*transactions_time_filtered['decay']
+        labels = define_ML_labels_ibm(transactions_time_filtered)
+
+    else:
+        transactions_time_filtered = transactions[
+            (transactions['Timestamp'] >= start_date) & 
+            (transactions['Timestamp'] < end_date)
+        ]
+        G = load_network_ibm(transactions_time_filtered)
+        labels = define_ML_labels_ibm(transactions_time_filtered)
     return G, labels
 
-def construct_network_ibm_time(start_dates, end_dates, type_dataset='HI-Small'):
+def construct_network_ibm_time(start_dates, end_dates, type_dataset='HI-Small', echo=False, days_echo=3):
     networks = []
     for start_date, end_date in zip(start_dates, end_dates):
-        G, labels = load_network_ibm_time(start_date, end_date, type_dataset=type_dataset)
+        G, labels = load_network_ibm_time(start_date, end_date, type_dataset=type_dataset, echo=echo, days_echo=days_echo)
         networks.append((G, labels))
     return networks
