@@ -3,15 +3,25 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 class NeuralNetwork(nn.Module):
-    def __init__(self, input_size: int, hidden_size: int, output_size: int):
+    def __init__(
+            self, 
+            num_layers: int,
+            input_size: int, 
+            hidden_size: int, 
+            output_size: int
+            ):
         super().__init__()
         #self.flatten = nn.Flatten() # Flattens the 2D image into a 1D array
+        self.layer1 = nn.Linear(input_size, hidden_size)
+        self.hidden_layers = nn.ModuleList()
+        for _ in range(num_layers - 2):
+            self.hidden_layers.append(nn.Linear(hidden_size, hidden_size))
+        self.output_layer = nn.Linear(hidden_size, output_size)
         self.linear_relu_stack = nn.Sequential(
-            nn.Linear(input_size, hidden_size),
+            self.layer1,
             nn.ReLU(),
-            nn.Linear(hidden_size, hidden_size),
-            nn.ReLU(),
-            nn.Linear(hidden_size, output_size),
+            *[layer for hidden_layer in self.hidden_layers for layer in (hidden_layer, nn.ReLU())],
+            self.output_layer
         )
 
     def forward(self, x):
