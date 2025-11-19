@@ -8,3 +8,4 @@ lightning
 torch
 torchvision
 scikit-learn
+xgboost
