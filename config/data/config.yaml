@@ -1,28 +1,13 @@
 parameters:
   dataset: 'IBM'
-  time_dynamic: false
+  time_dynamic: True
 
 IBM:
   type_dataset: 'HI-Small'
-  start_dates:
-    - '2022-09-01'
-    - '2022-09-02'
-    - '2022-09-03'
-    - '2022-09-04'
-    - '2022-09-05'
-    - '2022-09-06'
-    - '2022-09-07'
-    - '2022-09-08'
-    - '2022-09-09'
-    - '2022-09-10'
-  end_dates:
-    - '2022-09-02'
-    - '2022-09-03'
-    - '2022-09-04'
-    - '2022-09-05'
-    - '2022-09-06'
-    - '2022-09-07'
-    - '2022-09-08'
-    - '2022-09-09'
-    - '2022-09-10'
-    - '2022-09-11'
+  n_channels: 2
+  network_construction:
+    echo: True
+    days_echo: 3
+    time_step: 1
+    time_width: 1
+    time_type: 'days'
