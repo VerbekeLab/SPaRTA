@@ -6,7 +6,9 @@ conda install lightning -c conda-forge
 pip3 install torch torchvision
 conda install scikit-learn
 conda install -c conda-forge xgboost
+pip3 install pyarrow
+pip install h5py
 # Packages for visualisation graphs in python-igraph
 pip install igraph
 pip install easygui
-pip install cairocffi
+pip install cairo
