@@ -28,13 +28,18 @@ def load_transactions_ibm(type_dataset='HI-Small'):
     transactions = transactions[transactions['Timestamp'] <= '2022-09-11']
     return transactions
 
-def load_network_ibm(transactions, weight = 'Amount Paid'):
+def load_network_ibm(transactions, echo=False):
     G = nx.DiGraph()
     for idx, row in transactions.iterrows():
         from_account = row['Account']
         to_account = row['Account.1']
-        amount = row[weight]
-        G.add_edge(from_account, to_account, weight=amount)
+        amount_trans = row['amount_trans']
+        num_trans = row['num_trans']
+        if echo:
+            decay = row['decay']
+            G.add_edge(from_account, to_account, weight=decay, amount_trans=amount_trans, num_trans=num_trans)
+        else:
+            G.add_edge(from_account, to_account, weight=1, amount_trans=amount_trans, num_trans=num_trans)
     return G
 
 def define_ML_labels_ibm(transactions):
@@ -50,11 +55,15 @@ def define_ML_labels_ibm(transactions):
 
 def construct_network_ibm(type_dataset='HI-Small'):
     transactions = load_transactions_ibm(type_dataset=type_dataset)
-    G = load_network_ibm(transactions)
+    transactions_agg = transactions.groupby(['Account', 'Account.1']).agg({
+        'decay': 'max',                 # Take the maximum decay value
+        'Amount Paid': ['sum', 'count'] # Take both sum and count of the amount
+        }).reset_index()
+    
+    transactions_agg.columns = ['Account', 'Account.1', 'decay', 'amount_trans', 'num_trans']
+    G = load_network_ibm(transactions_agg)
     labels = define_ML_labels_ibm(transactions)
     return G, labels
-
-
 
 def load_network_ibm_time(start_date, end_date, type_dataset='HI-Small', echo=False, days_echo=3):
     transactions = load_transactions_ibm(type_dataset=type_dataset)
@@ -69,13 +78,13 @@ def load_network_ibm_time(start_date, end_date, type_dataset='HI-Small', echo=Fa
         transactions_time_filtered['decay'] = transactions_time_filtered['Timestamp'].apply(
             lambda x: exponential_time_decay(x, end_date, days_echo=days_echo)
         )
-        
-
-        transactions_time_decay = transactions_time_filtered[[
-            'Account', 'Account.1', 'decay'
-            ]].groupby(['Account', 'Account.1']).max().reset_index()
-        
-        G = load_network_ibm(transactions_time_decay, weight='decay')
+        transactions_time_filtered_agg = transactions_time_filtered.groupby(['Account', 'Account.1']).agg({
+            'decay': 'max',                 # Take the maximum decay value
+            'Amount Paid': ['sum', 'count'] # Take both sum and count of the amount
+            }).reset_index()
+    
+        transactions_time_filtered_agg.columns = ['Account', 'Account.1', 'decay', 'amount_trans', 'num_trans']
+        G = load_network_ibm(transactions_time_filtered_agg, echo=True)
 
         transactions_time_filtered['Is Laundering'] = transactions_time_filtered['Is Laundering']*transactions_time_filtered['decay']
         labels = define_ML_labels_ibm(transactions_time_filtered)
@@ -85,7 +94,14 @@ def load_network_ibm_time(start_date, end_date, type_dataset='HI-Small', echo=Fa
             (transactions['Timestamp'] >= start_date) & 
             (transactions['Timestamp'] < end_date)
         ]
-        G = load_network_ibm(transactions_time_filtered)
+
+        transactions_time_filtered_agg = transactions_time_filtered.groupby(['Account', 'Account.1']).agg({
+            'Amount Paid': ['sum', 'count'] # Take both sum and count of the amount
+            }).reset_index()
+    
+        transactions_time_filtered_agg.columns = ['Account', 'Account.1', 'decay', 'amount_trans', 'num_trans']
+
+        G = load_network_ibm(transactions_time_filtered_agg)
         labels = define_ML_labels_ibm(transactions_time_filtered)
     return G, labels
 
