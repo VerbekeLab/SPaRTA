@@ -22,19 +22,16 @@ graph_for_worker = None
 graph_for_worker_rev = None
 graph_for_worker_undirected = None
 
-def init_worker(graph, graph_rev, graph_undirected, weight):
+def init_worker(graph, graph_rev, graph_undirected):
     """
     Initializer for worker processes to set the graph in each subprocess.
     """
     global graph_for_worker
     global graph_for_worker_rev
     global graph_for_worker_undirected
-    global weight_for_worker
     graph_for_worker = graph
     graph_for_worker_rev = graph_rev
     graph_for_worker_undirected = graph_undirected
-    weight_for_worker = weight
-
 
 def process_node(node):
     results = node_measures(
@@ -42,11 +39,16 @@ def process_node(node):
         graph_for_worker,
         graph_for_worker_undirected,
         graph_for_worker_rev,
-        output_tensor=False, 
-        weight=weight_for_worker
+        output_tensor=False
     )
+    results_list = [node] + results['measure'] + results['size']
 
-    return tuple([node] + results['measure'] + results['size'])
+    for weight in ['amount_trans', 'num_trans']:
+        for agg in ['sum', 'mean', 'max', 'std']:
+            key_measure = f'transaction_{weight}_summary_{agg}'
+            results_list.append(results[key_measure])
+
+    return tuple(results_list)
 
 n_cpu = min(4, cpu_count() // 2)
 if __name__ == "__main__":
@@ -65,6 +67,22 @@ if __name__ == "__main__":
 
         echo = data_config[network]['network_construction']['echo']
         days_echo = data_config[network]['network_construction']['days_echo']
+
+    keys_to_include = ['measure_00', 'measure_01', 'measure_02', 
+                        'measure_10', 'measure_11', 'measure_12',
+                        'measure_20', 'measure_21', 'measure_22',
+                        'size_00', 'size_01', 'size_02', 
+                        'size_10', 'size_11', 'size_12',
+                        'size_20', 'size_21', 'size_22',
+                        ]
+            
+    weights = ['amount_trans', 'num_trans']
+    aggregations = ['sum', 'mean', 'max', 'std']
+
+    for weight in weights:
+        for agg in aggregations:
+            key_measure = f'transaction_{weight}_summary_{agg}'
+            keys_to_include.append(key_measure)
 
     if network == 'IBM':
         if dynamic:
@@ -87,37 +105,11 @@ if __name__ == "__main__":
                 with Pool(
                     processes=n_cpu,
                     initializer=init_worker,
-                    initargs=(G_reduced, G_rev, G_und, 'weight',)
+                    initargs=(G_reduced, G_rev, G_und,)
                 ) as pool:
                     results = list(tqdm(pool.imap(process_node, nodes), total=len(nodes)))
 
-                (
-                    nodes, 
-                    measure_00_list, measure_01_list, measure_02_list, measure_10_list, measure_11_list, measure_12_list, measure_20_list, measure_21_list, measure_22_list, 
-                    size_00_list, size_01_list, size_02_list, size_10_list, size_11_list, size_12_list, size_20_list, size_21_list, size_22_list
-                ) = zip(*results)
-
-                df = pd.DataFrame({
-                    "node": nodes,
-                    "measure_00": measure_00_list,
-                    "measure_01": measure_01_list,
-                    "measure_02": measure_02_list,
-                    "measure_10": measure_10_list,
-                    "measure_11": measure_11_list,
-                    "measure_12": measure_12_list,
-                    "measure_20": measure_20_list,
-                    "measure_21": measure_21_list,
-                    "measure_22": measure_22_list, 
-                    "size_00": size_00_list,
-                    "size_01": size_01_list,
-                    "size_02": size_02_list,
-                    "size_10": size_10_list,
-                    "size_11": size_11_list,
-                    "size_12": size_12_list,
-                    "size_20": size_20_list,
-                    "size_21": size_21_list,
-                    "size_22": size_22_list
-                })
+                df = pd.DataFrame(results, columns=['node'] + keys_to_include)
 
                 if echo:
                     out_path_features = f"results/features/{type_dataset}_dynamic_{i}_features_echo.csv"
@@ -149,37 +141,12 @@ if __name__ == "__main__":
             ) as pool:
                 results = list(tqdm(pool.imap(process_node, nodes), total=len(nodes)))
 
-            (
-                nodes, 
-                measure_00_list, measure_01_list, measure_02_list, measure_10_list, measure_11_list, measure_12_list, measure_20_list, measure_21_list, measure_22_list, 
-                size_00_list, size_01_list, size_02_list, size_10_list, size_11_list, size_12_list, size_20_list, size_21_list, size_22_list
-            ) = zip(*results)
+            df = pd.DataFrame(results, columns=['node'] + keys_to_include)
 
-            df = pd.DataFrame({
-                "node": nodes,
-                "measure_00": measure_00_list,
-                "measure_01": measure_01_list,
-                "measure_02": measure_02_list,
-                "measure_10": measure_10_list,
-                "measure_11": measure_11_list,
-                "measure_12": measure_12_list,
-                "measure_20": measure_20_list,
-                "measure_21": measure_21_list,
-                "measure_22": measure_22_list, 
-                "size_00": size_00_list,
-                "size_01": size_01_list,
-                "size_02": size_02_list,
-                "size_10": size_10_list,
-                "size_11": size_11_list,
-                "size_12": size_12_list,
-                "size_20": size_20_list,
-                "size_21": size_21_list,
-                "size_22": size_22_list
-            })
-            out_path_features = f"results/features/{type_dataset}_static_features.csv"
+            out_path_features = f"results/features/{type_dataset}_static_features_t.csv"
             df.to_csv(out_path_features, index=False)
             print(f"Results saved to {out_path_features}")
-            out_path_labels = f"results/features/{type_dataset}_static_labels.csv"
+            out_path_labels = f"results/features/{type_dataset}_static_labels_t.csv"
             labels.to_csv(out_path_labels)
             print(f"Labels saved to {out_path_labels}")
 

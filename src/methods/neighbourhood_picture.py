@@ -5,7 +5,7 @@ from src.methods.utils.neighbourhood_functions import *
 from src.methods.utils.summary_functions import *
 
 def gargaml_node_measures(G_ego_second, size_0, size_1, size_2, nodes_ordered, output_tensor):
-    adj_full = nx.adjacency_matrix(G_ego_second, nodelist=nodes_ordered, weight=None).toarray()
+    adj_full = nx.adjacency_matrix(G_ego_second, nodelist=nodes_ordered, weight='weight').toarray()
 
     measure_00, size_00 = measure_00_function(adj_full, size_0)
     measure_01, size_01 = measure_01_function(adj_full, size_0, size_1)
@@ -54,9 +54,9 @@ def gargaml_node_measures(G_ego_second, size_0, size_1, size_2, nodes_ordered, o
         }
     return result
 
-def transaction_measures(G_ego_second, size_0, size_1, nodes_ordered, aggregations, weight='Amount_trans'):
+def transaction_measures(G_ego_second, size_0, size_1, nodes_ordered, aggregations, weight='amount_trans'):
     # aggreation of the transaction (e.g., sum, mean, max)
-    # weight = 'Amount_trans' or 'Num_trans'
+    # weight = 'amount_trans' or 'num_trans'
     results_transaction = {}
     adj_full = nx.adjacency_matrix(G_ego_second, nodelist=nodes_ordered, weight=weight).toarray()
     for aggregation in aggregations:
@@ -91,8 +91,8 @@ def node_measures(node, G_copy, G_copy_und, G_copy_rev, output_tensor = True):
     size_2 = len(nodes_2)
 
     result_gargaml = gargaml_node_measures(G_ego_second, size_0, size_1, size_2, nodes_ordered, output_tensor)
-    result_transaction_amount = transaction_measures(G_ego_second, size_0, size_1, nodes_ordered, aggregations=['sum', 'mean', 'max', 'std'], weight='Amount_trans')
-    result_transaction_count = transaction_measures(G_ego_second, size_0, size_1, nodes_ordered, aggregations=['sum', 'mean', 'max', 'std'], weight='Num_trans')
+    result_transaction_amount = transaction_measures(G_ego_second, size_0, size_1, nodes_ordered, aggregations=['sum', 'mean', 'max', 'std'], weight='amount_trans')
+    result_transaction_count = transaction_measures(G_ego_second, size_0, size_1, nodes_ordered, aggregations=['sum', 'mean', 'max', 'std'], weight='num_trans')
     
     result = { # combine all results into a single dictionary
         **result_gargaml,
