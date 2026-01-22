@@ -74,10 +74,9 @@ class CNN_visual_VGG16(nn.Module):
         self.conv12 = nn.Conv2d(512, 512, 3, padding='same')
         self.conv13 = nn.Conv2d(512, 512, 3, padding='same')
         self.pool = nn.MaxPool2d(2, 2)
-        self.fc1 = nn.Linear(512 * 5 * 5, 2048)
+        self.fc1 = nn.Linear(512 * 7 * 7, 2048)
         self.fc2 = nn.Linear(2048, 2048)
         self.fc3 = nn.Linear(2048, 1)
-
 
     def forward(self, x):
         x = F.relu(self.conv1(x))
