@@ -56,11 +56,10 @@ def define_ML_labels_ibm(transactions):
 def construct_network_ibm(type_dataset='HI-Small'):
     transactions = load_transactions_ibm(type_dataset=type_dataset)
     transactions_agg = transactions.groupby(['Account', 'Account.1']).agg({
-        'decay': 'max',                 # Take the maximum decay value
         'Amount Paid': ['sum', 'count'] # Take both sum and count of the amount
         }).reset_index()
-    
-    transactions_agg.columns = ['Account', 'Account.1', 'decay', 'amount_trans', 'num_trans']
+
+    transactions_agg.columns = ['Account', 'Account.1', 'amount_trans', 'num_trans']
     G = load_network_ibm(transactions_agg)
     labels = define_ML_labels_ibm(transactions)
     return G, labels
@@ -99,7 +98,7 @@ def load_network_ibm_time(start_date, end_date, type_dataset='HI-Small', echo=Fa
             'Amount Paid': ['sum', 'count'] # Take both sum and count of the amount
             }).reset_index()
     
-        transactions_time_filtered_agg.columns = ['Account', 'Account.1', 'decay', 'amount_trans', 'num_trans']
+        transactions_time_filtered_agg.columns = ['Account', 'Account.1', 'amount_trans', 'num_trans']
 
         G = load_network_ibm(transactions_time_filtered_agg)
         labels = define_ML_labels_ibm(transactions_time_filtered)
