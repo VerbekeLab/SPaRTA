@@ -57,10 +57,10 @@ if __name__ == "__main__":
     method_config = load_config("config/methods/config.yaml")
 
     network = data_config['parameters']['dataset']
+    type_dataset = data_config[network]['type_dataset']
     dynamic = data_config['parameters']['time_dynamic']
 
     if dynamic:
-        type_dataset = data_config[network]['type_dataset']
         time_step=data_config[network]['network_construction']['time_step']
         time_width=data_config[network]['network_construction']['time_width']
         time_type=data_config[network]['network_construction']['time_type']
@@ -137,7 +137,7 @@ if __name__ == "__main__":
             with Pool(
                 processes=n_cpu,
                 initializer=init_worker,
-                initargs=(G_reduced, G_rev, G_und, None,)
+                initargs=(G_reduced, G_rev, G_und,)
             ) as pool:
                 results = list(tqdm(pool.imap(process_node, nodes), total=len(nodes)))
 
