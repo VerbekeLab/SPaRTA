@@ -1,7 +1,9 @@
 import numpy as np
 
 def summary_functions(piece, aggregation):
-    if aggregation == 'sum':
+    if piece.size==0:
+        return 0
+    elif aggregation == 'sum':
         return piece.sum()
     elif aggregation == 'mean':
         return piece.mean()
