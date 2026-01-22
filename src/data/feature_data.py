@@ -60,7 +60,7 @@ class NetworkImageDataset(Dataset):
         labels_df.columns = ['node', 'label']
         # Reindex labels to match node order in tensors
         labels_df = labels_df.set_index('node').reindex(all_nodes).reset_index()
-        self.y = torch.tensor(labels_df['label'].values, dtype=torch.float32)
+        self.y = torch.tensor(labels_df['label'], dtype=torch.float32)
 
     def __len__(self):
         return self.X.shape[0]
