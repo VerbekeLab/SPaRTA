@@ -29,15 +29,43 @@ class NeuralNetwork(nn.Module):
         return logits
     
 class CNN(nn.Module):
-    def __init__(self, num_channels=2):
+    def __init__(
+            self, 
+            num_channels=2, 
+            hidden_channels=8, 
+            num_layers=3,
+            kernel_size=3, 
+            max_pool=False,
+            half_final_layer=True):
         super().__init__()
-        self.conv1 = nn.Conv2d(num_channels, 8, 3, padding=1) 
-        self.conv2 = nn.Conv2d(8, 16, 2)
-        self.fc = nn.Linear(16 * 2 * 2, 1)
+
+        self.conv_layers = nn.ModuleList()
+        for i in range(num_layers):
+            if i == 0:
+                self.conv_layers.append(nn.Conv2d(num_channels, hidden_channels, kernel_size, padding='same'))
+            elif (i == num_layers - 1) and half_final_layer:
+                self.conv_layers.append(nn.Conv2d(hidden_channels, hidden_channels//2, kernel_size, padding='same'))
+            else:
+                self.conv_layers.append(nn.Conv2d(hidden_channels, hidden_channels, kernel_size, padding='same'))
+
+        self.pool = nn.MaxPool2d(2, 1) if max_pool else nn.Identity()
+
+        if max_pool:
+            if half_final_layer:
+                self.fc = nn.Linear(hidden_channels//2 * 2 * 2, 1)
+            else:
+                self.fc = nn.Linear(hidden_channels * 2 * 2, 1)
+
+        else:
+            if half_final_layer:
+                self.fc = nn.Linear(hidden_channels//2 * 3 * 3, 1)
+            else:
+                self.fc = nn.Linear(hidden_channels * 3 * 3, 1)
 
     def forward(self, x):
-        x = F.relu(self.conv1(x))
-        x = F.relu(self.conv2(x))
+        for conv in self.conv_layers:
+            x = F.relu(conv(x))
+        x = self.pool(x)
         x = torch.flatten(x, 1) # flatten all dimensions except batch
         x = self.fc(x)
         return x.squeeze()

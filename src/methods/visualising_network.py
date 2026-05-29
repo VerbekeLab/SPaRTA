@@ -27,7 +27,7 @@ import torch
 from torchvision import transforms
 import matplotlib.pyplot as plt
 
-from src.data.network_data_loader import construct_network_ibm
+from src.data.network_data_loader import construct_network
 from src.utils.graph_processing import graph_degree_rel, graph_degree_abs, graph_community
 
 def define_vertex_color(G, n, G_first):
@@ -128,7 +128,7 @@ n_cpu = min(4, cpu_count() // 2)
 
 if __name__ == "__main__":
     os.makedirs('results/pickle', exist_ok=True)
-    G, labels = construct_network_ibm()
+    G, labels = construct_network(dataset='IBM')
     G = graph_degree_abs(G, degree_cutoff=20)
     G = ig.Graph.from_networkx(G)
 

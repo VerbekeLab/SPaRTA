@@ -46,7 +46,7 @@ def process_node(node):
     for weight in ['amount_trans', 'num_trans']:
         for agg in ['sum', 'mean', 'max', 'std']:
             key_measure = f'transaction_{weight}_summary_{agg}'
-            results_list.append(results[key_measure])
+            results_list += results[key_measure]
 
     return tuple(results_list)
 
@@ -81,19 +81,20 @@ if __name__ == "__main__":
 
     for weight in weights:
         for agg in aggregations:
-            key_measure = f'transaction_{weight}_summary_{agg}'
-            keys_to_include.append(key_measure)
+            for suff in ['00', '01', '02', '10', '11', '12', '20', '21', '22']:
+                key_measure = f'transaction_{weight}_summary_{agg}_{suff}'
+                keys_to_include.append(key_measure)
 
     if network == 'IBM':
         if dynamic:
             start_dates, end_dates = define_dates(
-                load_transactions_ibm(type_dataset=type_dataset)['Timestamp'],
+                load_transactions(network, type_dataset=type_dataset)['timestamp'],
                 time_step=time_step,
                 time_width=time_width,
                 time_type=time_type
             )
 
-            networks = construct_network_ibm_time(start_dates, end_dates, type_dataset=type_dataset, echo=echo, days_echo=days_echo)
+            networks = construct_network_time(start_dates, end_dates, dataset=network, type_dataset=type_dataset, echo=echo, days_echo=days_echo)
             for i in range(len(networks)):
                 print(f"Processing dynamic network snapshot {i+1}/{len(networks)}...")
                 G, labels = networks[i]
@@ -112,12 +113,12 @@ if __name__ == "__main__":
                 df = pd.DataFrame(results, columns=['node'] + keys_to_include)
 
                 if echo:
-                    out_path_features = f"results/features/{type_dataset}_dynamic_{i}_features_echo.csv"
-                    out_path_labels = f"results/features/{type_dataset}_dynamic_{i}_labels_echo.csv"
+                    out_path_features = f"results/features/{type_dataset}_dynamic_{i}_features_echo_t.csv"
+                    out_path_labels = f"results/features/{type_dataset}_dynamic_{i}_labels_echo_t.csv"
                 else:
-                    out_path_features = f"results/features/{type_dataset}_dynamic_{i}_features.csv"
-                    out_path_labels = f"results/features/{type_dataset}_dynamic_{i}_labels.csv"
-                
+                    out_path_features = f"results/features/{type_dataset}_dynamic_{i}_features_t.csv"
+                    out_path_labels = f"results/features/{type_dataset}_dynamic_{i}_labels_t.csv"
+
                 df.to_csv(out_path_features, index=False)
                 print(f"Results saved to {out_path_features}")
                 labels.to_csv(out_path_labels)
@@ -126,7 +127,7 @@ if __name__ == "__main__":
 
         else:
             print("Processing static network...")
-            G, labels = construct_network_ibm()
+            G, labels = construct_network(dataset=network, type_dataset=type_dataset)
 
             G_reduced = graph_community(G)
             G_und = G_reduced.to_undirected()
