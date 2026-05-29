@@ -8,7 +8,8 @@ conda install scikit-learn
 conda install -c conda-forge xgboost
 pip3 install pyarrow
 pip install h5py
+pip install optuna
 # Packages for visualisation graphs in python-igraph
 pip install igraph
 pip install easygui
-pip install cairo
+pip install pycairo

@@ -9,3 +9,4 @@ torch
 torchvision
 scikit-learn
 xgboost
+optuna
