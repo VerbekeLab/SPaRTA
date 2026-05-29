@@ -61,7 +61,7 @@ def load_network_time(start_date, end_date, dataset='IBM', type_dataset=None, ec
     transactions = load_transactions(dataset, type_dataset=type_dataset)
 
     if echo:
-        start_date = end_date - np.timedelta64(days_echo, 'D')
+        start_date = end_date - np.timedelta64(days_echo, 'D') # Start date is set to be the end date minus the number of days for the echo effect
         transactions_time_filtered = transactions[
             (transactions['timestamp'] >= start_date) &
             (transactions['timestamp'] < end_date)

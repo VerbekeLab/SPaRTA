@@ -17,4 +17,19 @@ IBM:
     subsample: 0.8
     colsample_bytree: 0.8
 
-  
+AMLSim:
+  features_NN:
+    data_directory: 'results/features/'
+    num_layers: 2
+    hidden_size: 16
+    output_size: 1
+    n_epochs: 100
+    learning_rate: 0.001
+
+  features_XGBoost:
+    data_directory: 'results/features/'
+    n_estimators: 100
+    max_depth: 5
+    learning_rate: 0.1
+    subsample: 0.8
+    colsample_bytree: 0.8
