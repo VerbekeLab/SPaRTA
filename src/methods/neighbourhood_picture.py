@@ -58,7 +58,7 @@ def transaction_measures(G_ego_second, size_0, size_1, nodes_ordered, aggregatio
     # aggreation of the transaction (e.g., sum, mean, max)
     # weight = 'amount_trans' or 'num_trans'
     results_transaction = {}
-    adj_full = nx.adjacency_matrix(G_ego_second, nodelist=nodes_ordered, weight=weight).toarray()
+    adj_full = nx.to_numpy_array(G_ego_second, nodelist=nodes_ordered, weight=weight)
     for aggregation in aggregations:
         summary_00 = summary_00_function(adj_full, size_0, aggregation)
         summary_01 = summary_01_function(adj_full, size_0, size_1, aggregation)

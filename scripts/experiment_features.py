@@ -21,7 +21,7 @@ from src.methods.models import NeuralNetwork
 
 def data_prep_features(data_directory, dataset_type):
     feature_directory = f'{data_directory}/{dataset_type}_static_features_t.csv'
-    label_directory = f'{data_directory}/{dataset_type}_static_labels.csv'
+    label_directory = f'{data_directory}/{dataset_type}_static_labels_t.csv'
     df_features = pd.read_csv(feature_directory)
     df_labels = pd.read_csv(label_directory)
     df_labels.columns = ['node', 'label']
