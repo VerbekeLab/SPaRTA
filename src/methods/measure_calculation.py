@@ -102,13 +102,14 @@ if __name__ == "__main__":
                 G_und = G_reduced.to_undirected()
                 G_rev = G_reduced.reverse(copy=True)
                 nodes = list(G_reduced.nodes)
+                chunksize = max(1, len(nodes) // (n_cpu * 10))
                 print(f"Number of nodes: {len(nodes)} | Using {n_cpu} processes")
                 with Pool(
                     processes=n_cpu,
                     initializer=init_worker,
                     initargs=(G_reduced, G_rev, G_und,)
                 ) as pool:
-                    results = list(tqdm(pool.imap(process_node, nodes), total=len(nodes)))
+                    results = list(tqdm(pool.imap(process_node, nodes, chunksize=chunksize), total=len(nodes)))
 
                 df = pd.DataFrame(results, columns=['node'] + keys_to_include)
 
@@ -134,13 +135,14 @@ if __name__ == "__main__":
             G_rev = G_reduced.reverse(copy=True)
 
             nodes = list(G_reduced.nodes)
+            chunksize = max(1, len(nodes) // (n_cpu * 10))
             print(f"Number of nodes: {len(nodes)} | Using {n_cpu} processes")
             with Pool(
                 processes=n_cpu,
                 initializer=init_worker,
                 initargs=(G_reduced, G_rev, G_und,)
             ) as pool:
-                results = list(tqdm(pool.imap(process_node, nodes), total=len(nodes)))
+                results = list(tqdm(pool.imap(process_node, nodes, chunksize=chunksize), total=len(nodes)))
 
             df = pd.DataFrame(results, columns=['node'] + keys_to_include)
 
