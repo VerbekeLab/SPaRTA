@@ -1,19 +1,22 @@
 import numpy as np
+import pandas as pd
 
 def get_time_delta(step, time_type):
     if time_type == 'hours':
-        delta_t = np.timedelta64(step, 'h')
+        delta_t = pd.Timedelta(hours=step)
     elif time_type == 'days':
-        delta_t = np.timedelta64(step, 'D')
+        delta_t = pd.Timedelta(days=step)
     elif time_type == 'weeks':
-        delta_t = np.timedelta64(7 * step, 'D')
+        delta_t = pd.Timedelta(weeks=step)
     elif time_type == 'months':
-        delta_t = np.timedelta64(step, 'M')
+        delta_t = pd.Timedelta(days=30 * step)
     else:
         raise ValueError("Time type must be 'hours', 'days', 'weeks', or 'months'")
     return delta_t
 
 def start_end_dates(start_date, end_date, delta_t, width_t):
+    # delta_t are the time steps taken
+    # width_t is the width of the time window for each step
     start_dates = []
     end_dates = []
     date_t = start_date + delta_t
