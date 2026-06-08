@@ -5,6 +5,7 @@ import networkx as nx
 from .utils.dates import exponential_time_decay
 from .utils.IBM import load_transactions_ibm
 from .utils.AMLSim import load_transactions_amlsim
+from .utils.Tide import load_transactions_tide
 
 
 def load_transactions(dataset, type_dataset=None):
@@ -14,6 +15,8 @@ def load_transactions(dataset, type_dataset=None):
         return load_transactions_ibm(type_dataset=type_dataset)
     if dataset == 'AMLSim':
         return load_transactions_amlsim()
+    if dataset == 'Tide':
+        return load_transactions_tide()
     raise ValueError(f"Unknown dataset: {dataset}")
 
 
@@ -61,11 +64,11 @@ def load_network_time(start_date, end_date, dataset='IBM', type_dataset=None, ec
     transactions = load_transactions(dataset, type_dataset=type_dataset)
 
     if echo:
-        start_date = end_date - np.timedelta64(days_echo, 'D') # Start date is set to be the end date minus the number of days for the echo effect
+        start_date = end_date - pd.Timedelta(days=days_echo) # Start date is set to be the end date minus the number of days for the echo effect
         transactions_time_filtered = transactions[
             (transactions['timestamp'] >= start_date) &
             (transactions['timestamp'] < end_date)
-        ]
+        ].copy()
 
         transactions_time_filtered['decay'] = transactions_time_filtered['timestamp'].apply(
             lambda x: exponential_time_decay(x, end_date, days_echo=days_echo)
@@ -78,7 +81,7 @@ def load_network_time(start_date, end_date, dataset='IBM', type_dataset=None, ec
         transactions_time_filtered_agg.columns = ['from_account', 'to_account', 'decay', 'amount_trans', 'num_trans']
         G = load_network(transactions_time_filtered_agg, echo=True)
 
-        transactions_time_filtered['is_laundering'] = transactions_time_filtered['is_laundering'] * transactions_time_filtered['decay']
+        #transactions_time_filtered['is_laundering'] = transactions_time_filtered['is_laundering'] * transactions_time_filtered['decay']
         labels = define_ML_labels(transactions_time_filtered)
 
     else:
