@@ -54,7 +54,7 @@ def graph_community(G, resolution=10): # large resolution to have smaller commun
     directed = nx.is_directed(G)
     
     if directed:
-        G_undirected = G.copy().to_undirected()
+        G_undirected = G.to_undirected()  # already returns a fresh graph; no extra .copy() needed
     else:
         G_undirected = G.copy()
 

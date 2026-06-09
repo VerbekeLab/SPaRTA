@@ -34,18 +34,13 @@ def define_ML_labels(transactions):
 
 
 def load_network(transactions, echo=False):
-    G = nx.DiGraph()
-    for idx, row in transactions.iterrows():
-        from_account = row['from_account']
-        to_account = row['to_account']
-        amount_trans = row['amount_trans']
-        num_trans = row['num_trans']
-        if echo:
-            decay = row['decay']
-            G.add_edge(from_account, to_account, weight=decay, amount_trans=amount_trans, num_trans=num_trans)
-        else:
-            G.add_edge(from_account, to_account, weight=1, amount_trans=amount_trans, num_trans=num_trans)
-    return G
+    edges = transactions.copy()
+    edges['weight'] = edges['decay'] if echo else 1
+    return nx.from_pandas_edgelist(
+        edges, 'from_account', 'to_account',
+        edge_attr=['weight', 'amount_trans', 'num_trans'],
+        create_using=nx.DiGraph,
+    )
 
 
 def construct_network(dataset='IBM', type_dataset=None):
@@ -70,9 +65,11 @@ def load_network_time(start_date, end_date, dataset='IBM', type_dataset=None, ec
             (transactions['timestamp'] < end_date)
         ].copy()
 
-        transactions_time_filtered['decay'] = transactions_time_filtered['timestamp'].apply(
-            lambda x: exponential_time_decay(x, end_date, days_echo=days_echo)
-        )
+        # Vectorized form of exponential_time_decay: truncate the lag to whole seconds
+        # (matching the old `.astype('timedelta64[s]').astype(int)`) then apply the decay.
+        gamma = -np.log(0.01) / days_echo
+        delta_days = ((end_date - transactions_time_filtered['timestamp']) // pd.Timedelta(seconds=1)) / (3600 * 24)
+        transactions_time_filtered['decay'] = np.exp(-gamma * delta_days)
         transactions_time_filtered_agg = transactions_time_filtered.groupby(['from_account', 'to_account']).agg({
             'decay': 'max',
             'amount': ['sum', 'count']

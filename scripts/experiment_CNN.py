@@ -111,7 +111,7 @@ if __name__ == "__main__":
     num_channels = data_config[dataset]['n_channels']
 
     data = load_data(f"results/features/{type_dataset}_static_features_t.csv",
-                   f"results/features/{type_dataset}_static_labels.csv")
+                   f"results/features/{type_dataset}_static_labels_t.csv")
     
     X = data.drop(columns=['is_laundering'])
     y = data['is_laundering']
