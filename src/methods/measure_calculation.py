@@ -85,7 +85,7 @@ if __name__ == "__main__":
                 key_measure = f'transaction_{weight}_summary_{agg}_{suff}'
                 keys_to_include.append(key_measure)
 
-    if network == 'IBM':
+    if network in ('IBM', 'AMLSim'):
         if dynamic:
             start_dates, end_dates = define_dates(
                 load_transactions(network, type_dataset=type_dataset)['timestamp'],
@@ -154,5 +154,5 @@ if __name__ == "__main__":
             print(f"Labels saved to {out_path_labels}")
 
     else:
-        pass
+        raise ValueError(f"Feature extraction not supported for dataset: {network}")
 
