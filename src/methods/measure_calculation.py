@@ -50,7 +50,42 @@ def process_node(node):
 
     return tuple(results_list)
 
+keys_to_include = ['measure_00', 'measure_01', 'measure_02',
+                    'measure_10', 'measure_11', 'measure_12',
+                    'measure_20', 'measure_21', 'measure_22',
+                    'size_00', 'size_01', 'size_02',
+                    'size_10', 'size_11', 'size_12',
+                    'size_20', 'size_21', 'size_22',
+                    ]
+
+weights = ['amount_trans', 'num_trans']
+aggregations = ['sum', 'mean', 'max', 'std']
+
+for weight in weights:
+    for agg in aggregations:
+        for suff in ['00', '01', '02', '10', '11', '12', '20', '21', '22']:
+            key_measure = f'transaction_{weight}_summary_{agg}_{suff}'
+            keys_to_include.append(key_measure)
+
 n_cpu = min(4, cpu_count() // 2)
+
+def process_graph(G):
+    G_reduced = graph_community(G)
+    G_und = G_reduced.to_undirected()
+    G_rev = G_reduced.reverse(copy=True)
+
+    nodes = list(G_reduced.nodes)
+    chunksize = max(1, len(nodes) // (n_cpu * 10))
+    print(f"Number of nodes: {len(nodes)} | Using {n_cpu} processes")
+    with Pool(
+        processes=n_cpu,
+        initializer=init_worker,
+        initargs=(G_reduced, G_rev, G_und,)
+    ) as pool:
+        results = list(tqdm(pool.imap(process_node, nodes, chunksize=chunksize), total=len(nodes)))
+
+    return pd.DataFrame(results, columns=['node'] + keys_to_include)
+
 if __name__ == "__main__":
     os.makedirs('results', exist_ok=True)
     data_config = load_config("config/data/config.yaml")
@@ -68,23 +103,6 @@ if __name__ == "__main__":
         echo = data_config[network]['network_construction']['echo']
         days_echo = data_config[network]['network_construction']['days_echo']
 
-    keys_to_include = ['measure_00', 'measure_01', 'measure_02', 
-                        'measure_10', 'measure_11', 'measure_12',
-                        'measure_20', 'measure_21', 'measure_22',
-                        'size_00', 'size_01', 'size_02', 
-                        'size_10', 'size_11', 'size_12',
-                        'size_20', 'size_21', 'size_22',
-                        ]
-            
-    weights = ['amount_trans', 'num_trans']
-    aggregations = ['sum', 'mean', 'max', 'std']
-
-    for weight in weights:
-        for agg in aggregations:
-            for suff in ['00', '01', '02', '10', '11', '12', '20', '21', '22']:
-                key_measure = f'transaction_{weight}_summary_{agg}_{suff}'
-                keys_to_include.append(key_measure)
-
     if network in ('IBM', 'AMLSim'):
         if dynamic:
             start_dates, end_dates = define_dates(
@@ -98,20 +116,7 @@ if __name__ == "__main__":
             for i in range(len(networks)):
                 print(f"Processing dynamic network snapshot {i+1}/{len(networks)}...")
                 G, labels = networks[i]
-                G_reduced = graph_community(G)
-                G_und = G_reduced.to_undirected()
-                G_rev = G_reduced.reverse(copy=True)
-                nodes = list(G_reduced.nodes)
-                chunksize = max(1, len(nodes) // (n_cpu * 10))
-                print(f"Number of nodes: {len(nodes)} | Using {n_cpu} processes")
-                with Pool(
-                    processes=n_cpu,
-                    initializer=init_worker,
-                    initargs=(G_reduced, G_rev, G_und,)
-                ) as pool:
-                    results = list(tqdm(pool.imap(process_node, nodes, chunksize=chunksize), total=len(nodes)))
-
-                df = pd.DataFrame(results, columns=['node'] + keys_to_include)
+                df = process_graph(G)
 
                 if echo:
                     out_path_features = f"results/features/{type_dataset}_dynamic_{i}_features_echo_t.csv"
@@ -129,22 +134,7 @@ if __name__ == "__main__":
         else:
             print("Processing static network...")
             G, labels = construct_network(dataset=network, type_dataset=type_dataset)
-
-            G_reduced = graph_community(G)
-            G_und = G_reduced.to_undirected()
-            G_rev = G_reduced.reverse(copy=True)
-
-            nodes = list(G_reduced.nodes)
-            chunksize = max(1, len(nodes) // (n_cpu * 10))
-            print(f"Number of nodes: {len(nodes)} | Using {n_cpu} processes")
-            with Pool(
-                processes=n_cpu,
-                initializer=init_worker,
-                initargs=(G_reduced, G_rev, G_und,)
-            ) as pool:
-                results = list(tqdm(pool.imap(process_node, nodes, chunksize=chunksize), total=len(nodes)))
-
-            df = pd.DataFrame(results, columns=['node'] + keys_to_include)
+            df = process_graph(G)
 
             out_path_features = f"results/features/{type_dataset}_static_features_t.csv"
             df.to_csv(out_path_features, index=False)
