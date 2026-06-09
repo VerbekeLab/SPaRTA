@@ -36,17 +36,17 @@ def gargaml_node_measures(G_ego_second, size_0, size_1, size_2, nodes_ordered, o
             }
 
     else:
-        picture_measure = [
+        picture_measure = [float(x) for x in (
             measure_00, measure_01, measure_02,
             measure_10, measure_11, measure_12,
             measure_20, measure_21, measure_22
-        ]
+        )]
 
-        size_picture = [
+        size_picture = [float(x) for x in (
             size_00, size_01, size_02,
             size_10, size_11, size_12,
             size_20, size_21, size_22
-        ]
+        )]
 
         result = {
             'measure': picture_measure,
@@ -54,7 +54,7 @@ def gargaml_node_measures(G_ego_second, size_0, size_1, size_2, nodes_ordered, o
         }
     return result
 
-def transaction_measures(G_ego_second, size_0, size_1, nodes_ordered, aggregations, weight='amount_trans'):
+def transaction_measures(G_ego_second, size_0, size_1, nodes_ordered, aggregations, weight='amount_trans', output_tensor=True):
     # aggreation of the transaction (e.g., sum, mean, max)
     # weight = 'amount_trans' or 'num_trans'
     results_transaction = {}
@@ -70,12 +70,20 @@ def transaction_measures(G_ego_second, size_0, size_1, nodes_ordered, aggregatio
         summary_21 = summary_21_function(adj_full, size_0, size_1, aggregation)
         summary_22 = summary_22_function(adj_full, size_0, size_1, aggregation)
 
-      
-        results_transaction[f'transaction_{weight}_summary_{aggregation}'] = [
-            summary_00, summary_01, summary_02,
-            summary_10, summary_11, summary_12,
-            summary_20, summary_21, summary_22
-        ]
+        if output_tensor:
+            # mirror the (1, 3, 3) shape used for 'measure' and 'size'
+            summary_picture = torch.tensor([
+                [summary_00, summary_01, summary_02],
+                [summary_10, summary_11, summary_12],
+                [summary_20, summary_21, summary_22]
+            ])
+            results_transaction[f'transaction_{weight}_summary_{aggregation}'] = summary_picture.unsqueeze(0)
+        else:
+            results_transaction[f'transaction_{weight}_summary_{aggregation}'] = [float(x) for x in (
+                summary_00, summary_01, summary_02,
+                summary_10, summary_11, summary_12,
+                summary_20, summary_21, summary_22
+            )]
 
     return results_transaction
 
@@ -91,8 +99,8 @@ def node_measures(node, G_copy, G_copy_und, G_copy_rev, output_tensor = True):
     size_2 = len(nodes_2)
 
     result_gargaml = gargaml_node_measures(G_ego_second, size_0, size_1, size_2, nodes_ordered, output_tensor)
-    result_transaction_amount = transaction_measures(G_ego_second, size_0, size_1, nodes_ordered, aggregations=['sum', 'mean', 'max', 'std'], weight='amount_trans')
-    result_transaction_count = transaction_measures(G_ego_second, size_0, size_1, nodes_ordered, aggregations=['sum', 'mean', 'max', 'std'], weight='num_trans')
+    result_transaction_amount = transaction_measures(G_ego_second, size_0, size_1, nodes_ordered, aggregations=['sum', 'mean', 'max', 'std'], weight='amount_trans', output_tensor=output_tensor)
+    result_transaction_count = transaction_measures(G_ego_second, size_0, size_1, nodes_ordered, aggregations=['sum', 'mean', 'max', 'std'], weight='num_trans', output_tensor=output_tensor)
     
     result = { # combine all results into a single dictionary
         **result_gargaml,
