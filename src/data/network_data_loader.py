@@ -28,7 +28,7 @@ def define_ML_labels(transactions):
     transactions_labels = pd.concat([transactions_from, transactions_to], axis=0)
 
     accounts_labelled = transactions_labels.groupby('from_account').mean()
-    accounts_labelled['is_laundering'] = (accounts_labelled['is_laundering'] > 0.1) * 1
+    accounts_labelled['is_laundering'] = (accounts_labelled['is_laundering'] > 0) * 1
     accounts_labelled.index.name = 'Account'
     return accounts_labelled
 
