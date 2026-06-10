@@ -36,6 +36,10 @@ def load_transactions_tide(type_dataset='HI'):
         f'./data/Tide/generated_transactions_{type_dataset}.csv',
         usecols=columns
     )
+
+    #Remove transactions where source account is 'individual'. 
+    transactions = transactions[~transactions['src'].str.startswith('individual')]
+
     transactions = transactions.rename(columns=TIDE_COLUMN_MAP)
     # Tide transactions come in multiple currencies; convert them all to USD.
     rate = transactions['currency'].map(USD_EXCHANGE_RATES)
@@ -45,5 +49,6 @@ def load_transactions_tide(type_dataset='HI'):
     # Timestamps are mostly second-resolution but a minority carry microseconds
     # (e.g. '...:15.446144'); ISO8601 parses both shapes.
     transactions['timestamp'] = pd.to_datetime(transactions['timestamp'], format='ISO8601')
+
     return transactions
 
