@@ -31,16 +31,24 @@ USD_EXCHANGE_RATES = {
 
 
 def load_transactions_tide(type_dataset='HI'):
-    columns = list(TIDE_COLUMN_MAP.keys()) + ['currency']
+    columns = list(TIDE_COLUMN_MAP.keys()) + ['currency', 'edge_type']
     transactions = pd.read_csv(
-        f'./data/Tide/generated_transactions_{type_dataset}.csv',
-        usecols=columns
+        f'./data/Tide/generated_edges_{type_dataset}.csv',
+        usecols=columns,
+        low_memory=False,
     )
 
-    #Remove transactions where source account is 'individual'. 
+    # The Tide edge file interleaves 'transaction' and 'ownership' edges; only
+    # transaction edges carry an amount/currency/timestamp, so keep those.
+    transactions = transactions[transactions['edge_type'] == 'transaction']
+    transactions = transactions.drop(columns='edge_type')
+
+    #Remove transactions where source account is 'individual'.
     transactions = transactions[~transactions['src'].str.startswith('individual')]
 
     transactions = transactions.rename(columns=TIDE_COLUMN_MAP)
+    # Drop self-loops to conform to the canonical loader contract.
+    transactions = transactions[transactions['from_account'] != transactions['to_account']]
     # Tide transactions come in multiple currencies; convert them all to USD.
     rate = transactions['currency'].map(USD_EXCHANGE_RATES)
     assert not rate.isna().any(), "unknown currency in Tide transactions"
@@ -49,6 +57,9 @@ def load_transactions_tide(type_dataset='HI'):
     # Timestamps are mostly second-resolution but a minority carry microseconds
     # (e.g. '...:15.446144'); ISO8601 parses both shapes.
     transactions['timestamp'] = pd.to_datetime(transactions['timestamp'], format='ISO8601')
+    # is_laundering reads back as object-dtype Python bools (the ownership rows
+    # leave blanks in the column); normalise to a clean boolean like IBM/AMLSim.
+    transactions['is_laundering'] = transactions['is_laundering'].astype(bool)
 
     return transactions
 
