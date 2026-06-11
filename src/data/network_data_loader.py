@@ -16,7 +16,9 @@ def load_transactions(dataset, type_dataset=None):
     if dataset == 'AMLSim':
         return load_transactions_amlsim()
     if dataset == 'Tide':
-        return load_transactions_tide()
+        if type_dataset is None:
+            return load_transactions_tide()
+        return load_transactions_tide(type_dataset=type_dataset)
     raise ValueError(f"Unknown dataset: {dataset}")
 
 

@@ -23,7 +23,7 @@ AMLSim:
     time_type: 'days'
 
 Tide:
-  type_dataset: 'HI'
+  type_dataset: 'HI' # 'HI' (higher illicit ratio) or 'LI' (lower illicit ratio) -> reads data/Tide/generated_edges_<type>.csv
   n_channels: 10 # channels after aggregation
   network_construction:
     echo: True
