@@ -10,7 +10,7 @@ import pandas as pd
 from tqdm import tqdm
 from multiprocessing import Pool, cpu_count
 
-from src.utils.setup import load_config
+from src.utils.setup import load_config, resolve_dataset
 from src.utils.graph_processing import graph_community
 
 from src.data.network_data_loader import *
@@ -91,7 +91,7 @@ if __name__ == "__main__":
     data_config = load_config("config/data/config.yaml")
     method_config = load_config("config/methods/config.yaml")
 
-    network = data_config['parameters']['dataset']
+    network = resolve_dataset(data_config)
     type_dataset = data_config[network]['type_dataset']
     dynamic = data_config['parameters']['time_dynamic']
 

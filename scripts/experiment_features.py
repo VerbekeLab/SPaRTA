@@ -15,7 +15,7 @@ import torch.nn as nn
 from sklearn.linear_model import LogisticRegression
 
 from sklearn.metrics import roc_auc_score, average_precision_score, roc_curve, precision_recall_curve
-from src.utils.setup import load_config
+from src.utils.setup import load_config, resolve_dataset, resolve_experiment
 
 from src.methods.models import NeuralNetwork
 
@@ -156,10 +156,10 @@ if __name__ == "__main__":
     data_config = load_config("config/data/config.yaml")
     method_config = load_config("config/methods/config.yaml")
 
-    network = data_config['parameters']['dataset']
+    network = resolve_dataset(data_config)
     dataset_type = data_config[network]['type_dataset']
 
-    experiment = method_config['experiment']
+    experiment = resolve_experiment(method_config)
     experiment_params = method_config[network][experiment]
     data_directory = experiment_params['data_directory']
 

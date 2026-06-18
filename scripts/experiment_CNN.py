@@ -14,7 +14,7 @@ from sklearn.model_selection import train_test_split
 
 from src.data.feature_data import ImageDataset
 from src.methods.models import CNN
-from src.utils.setup import load_config
+from src.utils.setup import load_config, resolve_dataset
 
 from sklearn.metrics import roc_auc_score, average_precision_score
 
@@ -105,7 +105,7 @@ if __name__ == "__main__":
     data_config = load_config("config/data/config.yaml")
     method_config = load_config("config/methods/config.yaml")
 
-    dataset = data_config['parameters']['dataset']
+    dataset = resolve_dataset(data_config)
     type_dataset = data_config[dataset]['type_dataset']
 
     num_channels = data_config[dataset]['n_channels']
