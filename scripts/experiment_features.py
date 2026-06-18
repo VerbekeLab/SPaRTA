@@ -33,7 +33,7 @@ def data_prep_features(data_directory, dataset_type):
     X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=1997) 
     return X_train, X_test, y_train, y_test
 
-def experiment_features_LogisticRegression(X_train, X_test, y_train, y_test):
+def experiment_features_LogisticRegression(X_train, X_test, y_train, y_test, dataset_type):
     logreg = LogisticRegression(max_iter=1000)
     logreg.fit(X_train, y_train)
 
@@ -44,7 +44,7 @@ def experiment_features_LogisticRegression(X_train, X_test, y_train, y_test):
     precision, recall, thresholds = precision_recall_curve(y_test, y_pred_proba)
     AUC_PR = average_precision_score(y_test, y_pred_proba)
 
-    with open('results/experiments/features_LogisticRegression.txt', 'w') as f:
+    with open(f'results/experiments/{dataset_type}_features_LogisticRegression.txt', 'w') as f:
         f.write(f'AUC ROC: {AUC_ROC}\n')
         f.write(f'AUC PR: {AUC_PR}\n')
         f.write(f'FPR: {fpr}\n')
@@ -52,32 +52,27 @@ def experiment_features_LogisticRegression(X_train, X_test, y_train, y_test):
         f.write(f'Precision: {precision}\n')
         f.write(f'Recall: {recall}\n')
 
-def experiment_features_XGBoost_tune(X_train, y_train):
-    dtrain = xgb.DMatrix(X_train, label=y_train)
-
-    params = {'objective': ['binary:logistic'], 
-                'max_depth': [3, 4, 5, 6], # depth of each tree
-                'eta': [0.01, 0.1, 0.2], # learning rate
-                'subsample': [0.6, 0.8, 1.0], # fraction of data to use per tree
-                }
+def experiment_features_XGBoost_tune(X_train, y_train, dataset_type, xgb_params):
+    param_grid = xgb_params['param_grid']
 
     gbm = xgb.XGBClassifier()
-    gridsearch = GridSearchCV(estimator=gbm, param_grid=params, scoring='roc_auc', cv=5, verbose=1)
+    gridsearch = GridSearchCV(estimator=gbm, param_grid=param_grid,
+                              scoring=xgb_params['scoring'], cv=xgb_params['cv'], verbose=1)
     gridsearch.fit(X_train, y_train)
 
-    with open('results/experiments/HPT_features_XGBoost.txt', 'w') as f:
+    with open(f'results/experiments/{dataset_type}_HPT_features_XGBoost.txt', 'w') as f:
         f.write(f'Best_parameters:{gridsearch.best_params_}\n')
         f.write(f'Best_AUC_ROC:{gridsearch.best_score_}\n')
 
     return gridsearch.best_params_
 
 
-def experiment_features_XGBoost(X_train, X_test, y_train, y_test):
+def experiment_features_XGBoost(X_train, X_test, y_train, y_test, dataset_type, xgb_params):
     dtrain = xgb.DMatrix(X_train, label=y_train)
     dtest = xgb.DMatrix(X_test, label=y_test)
 
-    params = experiment_features_XGBoost_tune(X_train, y_train)
-    model = xgb.train(params, dtrain, num_boost_round=200)
+    params = experiment_features_XGBoost_tune(X_train, y_train, dataset_type, xgb_params)
+    model = xgb.train(params, dtrain, num_boost_round=xgb_params['num_boost_round'])
     y_pred_proba = model.predict(dtest)
     fpr, tpr, thresholds = roc_curve(y_test, y_pred_proba)
     AUC_ROC = roc_auc_score(y_test, y_pred_proba)
@@ -85,7 +80,7 @@ def experiment_features_XGBoost(X_train, X_test, y_train, y_test):
     precision, recall, thresholds = precision_recall_curve(y_test, y_pred_proba)
     AUC_PR = average_precision_score(y_test, y_pred_proba)
 
-    with open('results/experiments/features_XGBoost.txt', 'w') as f:
+    with open(f'results/experiments/{dataset_type}_features_XGBoost.txt', 'w') as f:
         f.write(f'AUC ROC: {AUC_ROC}\n')
         f.write(f'AUC PR: {AUC_PR}\n')
         f.write(f'FPR: {fpr}\n')
@@ -94,22 +89,22 @@ def experiment_features_XGBoost(X_train, X_test, y_train, y_test):
         f.write(f'Recall: {recall}\n')
 
 
-def experiment_features_NN(X_train, X_test, y_train, y_test):
+def experiment_features_NN(X_train, X_test, y_train, y_test, dataset_type, nn_params):
     input_size = X_train.shape[1]
-    hidden_size = 16
-    output_size = 1
+    hidden_size = nn_params['hidden_size']
+    output_size = nn_params['output_size']
 
-    n_epochs = 100
-    learning_rate = 0.001
+    n_epochs = nn_params['n_epochs']
+    learning_rate = nn_params['learning_rate']
 
     model = NeuralNetwork(
-        num_layers=2,
+        num_layers=nn_params['num_layers'],
         input_size=input_size,
         hidden_size=hidden_size,
         output_size=output_size
-    )   
+    )
 
-    train_weight = round((y_train == 0).sum() / (y_train == 1).sum())*10
+    train_weight = round((y_train == 0).sum() / (y_train == 1).sum())*nn_params['pos_weight_scale']
 
     criterion = nn.BCEWithLogitsLoss(pos_weight=torch.tensor([train_weight]))
     optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate, weight_decay=1e-5)
@@ -144,7 +139,7 @@ def experiment_features_NN(X_train, X_test, y_train, y_test):
         precision, recall, thresholds = precision_recall_curve(y_test, torch.sigmoid(test_outputs))
         AUC_PR = average_precision_score(y_test, torch.sigmoid(test_outputs))
 
-    with open('results/experiments/features_NN.txt', 'w') as f:
+    with open(f'results/experiments/{dataset_type}_features_NN.txt', 'w') as f:
         f.write(f'AUC ROC: {AUC_ROC}\n')
         f.write(f'AUC PR: {AUC_PR}\n')
         f.write(f'FPR: {fpr}\n')
@@ -159,11 +154,17 @@ if __name__ == "__main__":
     network = resolve_dataset(data_config)
     dataset_type = data_config[network]['type_dataset']
 
+    # This script trains all three tabular models in one go; read each model's
+    # params block. (resolve_experiment is kept for the data_directory lookup
+    # and so SPARTA_EXPERIMENT stays meaningful across the entry points.)
     experiment = resolve_experiment(method_config)
-    experiment_params = method_config[network][experiment]
-    data_directory = experiment_params['data_directory']
+    nn_params = method_config[network]['features_NN']
+    xgb_params = method_config[network]['features_XGBoost']
+    data_directory = method_config[network][experiment]['data_directory']
+
+    os.makedirs('results/experiments', exist_ok=True)
 
     X_train, X_test, y_train, y_test = data_prep_features(data_directory, dataset_type)
-    experiment_features_LogisticRegression(X_train, X_test, y_train, y_test)
-    experiment_features_XGBoost(X_train, X_test, y_train, y_test)
-    experiment_features_NN(X_train, X_test, y_train, y_test)
+    experiment_features_LogisticRegression(X_train, X_test, y_train, y_test, dataset_type)
+    experiment_features_XGBoost(X_train, X_test, y_train, y_test, dataset_type, xgb_params)
+    experiment_features_NN(X_train, X_test, y_train, y_test, dataset_type, nn_params)

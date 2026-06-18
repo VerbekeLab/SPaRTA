@@ -14,10 +14,11 @@ from sklearn.model_selection import train_test_split
 
 from src.data.feature_data import ImageDataset
 from src.methods.models import CNN
-from src.utils.setup import load_config, resolve_dataset
+from src.utils.setup import load_config, resolve_dataset, suggest_param
 
 from sklearn.metrics import roc_auc_score, average_precision_score
 
+import json
 import optuna
 
 def load_data(features_path, labels_path):
@@ -34,29 +35,25 @@ def transforms_channels(X, n_channels):
     return transforms.Normalize(X_mean, X_std)
 
 def objective(trial):
-    ### To Do ###
-    # Define hyperparameter search space
-    num_channels = 10
-    num_epochs = trial.suggest_int('num_epochs', 10, 500, step=10)
-    hidden_channels = trial.suggest_int('hidden_channels', 8, 64, step=2)
-    num_layers = trial.suggest_int('num_layers', 2, 5)
-    kernel_size = trial.suggest_int('kernel_size', 2, 3)
-    max_pool = trial.suggest_categorical('max_pool', [True, False])
-    half_final_layer = trial.suggest_categorical('half_final_layer', [True, False])
-    scale_labels = trial.suggest_int('scale_labels', 0, 100000, step=100)
-    #learning_rate = trial.suggest_float('learning_rate', 1e-5, 1e-2, log=True)
-    learning_rate = trial.suggest_categorical('learning_rate', [1e-5, 1e-4, 1e-3, 1e-2])
+    # Search space is driven by config (features_CNN.search_space); suggest_param
+    # maps each entry to the right optuna suggest_* call. NUM_CHANNELS and
+    # SEARCH_SPACE are set as module globals in __main__.
+    params = {name: suggest_param(trial, name, spec) for name, spec in SEARCH_SPACE.items()}
+
+    num_epochs = params['num_epochs']
+    scale_labels = params['scale_labels']
+    learning_rate = params['learning_rate']
 
     model = CNN(
-        num_channels=num_channels,
-        hidden_channels=hidden_channels,
-        num_layers=num_layers,
-        kernel_size=kernel_size,
-        max_pool=max_pool,
-        half_final_layer=half_final_layer
+        num_channels=NUM_CHANNELS,
+        hidden_channels=params['hidden_channels'],
+        num_layers=params['num_layers'],
+        kernel_size=params['kernel_size'],
+        max_pool=params['max_pool'],
+        half_final_layer=params['half_final_layer']
     )
     model.to(device)
-    
+
     y_train = dataset_train.y.numpy()
     if scale_labels > 0:
         train_weight = round((y_train == 0).sum() / (y_train == 1).sum())*scale_labels/100; print(f"Positive class weight: {train_weight}")
@@ -100,8 +97,6 @@ if __name__ == "__main__":
 
     device = torch.device("cuda" if torch.cuda.is_available() else "mps" if torch.backends.mps.is_available() else "cpu"); print(f"Training on: {device}")
 
-    batch_size = 512
-
     data_config = load_config("config/data/config.yaml")
     method_config = load_config("config/methods/config.yaml")
 
@@ -109,6 +104,12 @@ if __name__ == "__main__":
     type_dataset = data_config[dataset]['type_dataset']
 
     num_channels = data_config[dataset]['n_channels']
+
+    cnn_cfg = method_config[dataset]['features_CNN']
+    batch_size = cnn_cfg['batch_size']
+    # Globals consumed by objective().
+    SEARCH_SPACE = cnn_cfg['search_space']
+    NUM_CHANNELS = num_channels
 
     data = load_data(f"results/features/{type_dataset}_static_features_t.csv",
                    f"results/features/{type_dataset}_static_labels_t.csv")
@@ -129,11 +130,30 @@ if __name__ == "__main__":
     loader_val = DataLoader(dataset_val, batch_size=batch_size, shuffle=False)
     loader_test = DataLoader(dataset_test, batch_size=batch_size, shuffle=False)
 
-    study = optuna.create_study(direction='maximize')
-    study.optimize(objective, n_trials=100)
+    os.makedirs("results/tuning", exist_ok=True)
+
+    # Persist to SQLite so the study can be resumed and shared across parallel
+    # array tasks; one study per dataset (load_if_exists -> append, not clobber).
+    study_name = f"CNN_{type_dataset}"
+    storage = cnn_cfg.get('storage')
+    if storage:
+        storage = storage.format(dataset=type_dataset)
+    study = optuna.create_study(
+        direction='maximize',
+        study_name=study_name,
+        storage=storage,
+        load_if_exists=True,
+    )
+    study.optimize(objective, n_trials=cnn_cfg['n_trials'])
     cnn_params = study.best_params
     cnn_values = study.best_value
-    with open("results/tuning/CNN_params.txt", "w") as f:
+
+    # Machine-readable best params (for a downstream final-train run) ...
+    with open(f"results/tuning/{study_name}_best_params.json", "w") as f:
+        json.dump({"dataset": type_dataset, "best_params": cnn_params,
+                   "best_value_AUCPR": cnn_values}, f, indent=2)
+    # ... and a human-readable copy.
+    with open(f"results/tuning/{study_name}_params.txt", "w") as f:
         f.write(str(cnn_params))
         f.write("\n")
         f.write("AUC-PRC: "+str(cnn_values))

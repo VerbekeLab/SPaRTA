@@ -1,52 +1,90 @@
-experiment: 'features_NN' #Options are 'features_NN' and 'features_XGBoost'
+experiment: 'features_NN' # 'features_NN', 'features_XGBoost', or 'features_CNN'
+
+# ---------------------------------------------------------------------------
+# Default hyperparameters and tuning search spaces, defined once here and
+# shared across datasets via YAML anchors (&name) + merge keys (<<: *name).
+# To tune a single dataset differently, override the field inside its block,
+# e.g.:
+#     Tide:
+#       features_CNN:
+#         <<: *features_CNN
+#         n_trials: 50            # everything else inherited from the default
+# Note: the merge is shallow — overriding `search_space` replaces the whole
+# nested dict, so re-list every entry you want when you override it.
+# The `defaults` key itself is not read by any script; it only holds anchors.
+# ---------------------------------------------------------------------------
+defaults:
+  # Shallow feed-forward net on the 3x3 measures. Defaults reproduce the
+  # values previously hardcoded in scripts/experiment_features.py.
+  features_NN: &features_NN
+    data_directory: 'results/features/'
+    num_layers: 2
+    hidden_size: 16
+    output_size: 1
+    n_epochs: 100
+    learning_rate: 0.001
+    pos_weight_scale: 10        # pos_weight = round(neg/pos) * pos_weight_scale
+
+  # XGBoost with sklearn GridSearchCV. `param_grid` mirrors the grid that was
+  # previously hardcoded; edit it to change the search.
+  features_XGBoost: &features_XGBoost
+    data_directory: 'results/features/'
+    num_boost_round: 200
+    cv: 5
+    scoring: 'roc_auc'
+    param_grid:
+      objective: ['binary:logistic']
+      max_depth: [3, 4, 5, 6]   # depth of each tree
+      eta: [0.01, 0.1, 0.2]     # learning rate
+      subsample: [0.6, 0.8, 1.0]  # fraction of data per tree
+
+  # CNN over the 3x3 pictures, tuned with Optuna. `search_space` is consumed by
+  # suggest_param (see src/utils/setup.py): a list -> categorical, a
+  # {low, high, step?} dict -> suggest_int, add `type: float` (+ optional `log`)
+  # for suggest_float. `storage` persists the study to SQLite so array tasks can
+  # resume / run in parallel; the study name is derived per dataset in-script.
+  features_CNN: &features_CNN
+    data_directory: 'results/features/'
+    n_trials: 100
+    batch_size: 512
+    # Optuna study storage. Leave null (default) for an in-memory study: no
+    # files, no extra dependencies, results still written to results/tuning/.
+    # To make studies resumable / shareable across parallel array tasks, set a
+    # SQLite URL (sqlite3 ships with Python, nothing to install), e.g.:
+    #   storage: 'sqlite:///results/tuning/optuna_{dataset}.db'
+    # `{dataset}` is filled with the dataset type in-script -> one DB file per
+    # dataset, so concurrent array tasks don't contend on a single SQLite file.
+    storage: null
+    search_space:
+      num_epochs:       {low: 10, high: 500, step: 10}
+      hidden_channels:  {low: 8, high: 64, step: 2}
+      num_layers:       {low: 2, high: 5}
+      kernel_size:      {low: 2, high: 3}
+      max_pool:         [true, false]
+      half_final_layer: [true, false]
+      scale_labels:     {low: 0, high: 100000, step: 100}
+      learning_rate:    [0.00001, 0.0001, 0.001, 0.01]
 
 IBM:
   features_NN:
-    data_directory: 'results/features/'
-    num_layers: 2
-    hidden_size: 16
-    output_size: 1
-    n_epochs: 100
-    learning_rate: 0.001
-
+    <<: *features_NN
   features_XGBoost:
-    data_directory: 'results/features/'
-    n_estimators: 100
-    max_depth: 5
-    learning_rate: 0.1
-    subsample: 0.8
-    colsample_bytree: 0.8
+    <<: *features_XGBoost
+  features_CNN:
+    <<: *features_CNN
 
 AMLSim:
   features_NN:
-    data_directory: 'results/features/'
-    num_layers: 2
-    hidden_size: 16
-    output_size: 1
-    n_epochs: 100
-    learning_rate: 0.001
-
+    <<: *features_NN
   features_XGBoost:
-    data_directory: 'results/features/'
-    n_estimators: 100
-    max_depth: 5
-    learning_rate: 0.1
-    subsample: 0.8
-    colsample_bytree: 0.8
+    <<: *features_XGBoost
+  features_CNN:
+    <<: *features_CNN
 
 Tide:
   features_NN:
-    data_directory: 'results/features/'
-    num_layers: 2
-    hidden_size: 16
-    output_size: 1
-    n_epochs: 100
-    learning_rate: 0.001
-
+    <<: *features_NN
   features_XGBoost:
-    data_directory: 'results/features/'
-    n_estimators: 100
-    max_depth: 5
-    learning_rate: 0.1
-    subsample: 0.8
-    colsample_bytree: 0.8
+    <<: *features_XGBoost
+  features_CNN:
+    <<: *features_CNN

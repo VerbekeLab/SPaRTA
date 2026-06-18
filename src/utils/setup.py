@@ -39,3 +39,27 @@ def resolve_experiment(method_config: Dict[str, Any]) -> str:
     Falls back to the top-level ``experiment`` key when unset.
     """
     return os.environ.get("SPARTA_EXPERIMENT", method_config['experiment'])
+
+
+def suggest_param(trial, name: str, spec: Any):
+    """
+    Map a YAML search-space entry to an Optuna ``trial.suggest_*`` call.
+
+    Spec forms (kept deliberately small so the config stays readable):
+
+    - ``list``  -> ``suggest_categorical`` (e.g. ``[1e-5, 1e-4, 1e-3]``)
+    - ``{low, high, step?}``              -> ``suggest_int`` (default)
+    - ``{low, high, step?, log?, type: float}`` -> ``suggest_float``
+    - any scalar -> returned as-is (a fixed, untuned value)
+
+    ``trial`` is an Optuna ``Trial``; this helper never imports optuna itself.
+    """
+    if isinstance(spec, list):
+        return trial.suggest_categorical(name, spec)
+    if isinstance(spec, dict):
+        low, high = spec['low'], spec['high']
+        if spec.get('type') == 'float':
+            return trial.suggest_float(name, low, high,
+                                       step=spec.get('step'), log=spec.get('log', False))
+        return trial.suggest_int(name, low, high, step=spec.get('step', 1))
+    return spec
