@@ -3,16 +3,16 @@ import pandas as pd
 import networkx as nx
 
 from .utils.dates import exponential_time_decay
-from .utils.IBM import load_transactions_ibm
+from .utils.AMLWorld import load_transactions_amlworld
 from .utils.AMLSim import load_transactions_amlsim
 from .utils.Tide import load_transactions_tide
 
 
 def load_transactions(dataset, type_dataset=None):
-    if dataset == 'IBM':
+    if dataset == 'AMLWorld':
         if type_dataset is None:
-            return load_transactions_ibm()
-        return load_transactions_ibm(type_dataset=type_dataset)
+            return load_transactions_amlworld()
+        return load_transactions_amlworld(type_dataset=type_dataset)
     if dataset == 'AMLSim':
         return load_transactions_amlsim()
     if dataset == 'Tide':
@@ -45,7 +45,7 @@ def load_network(transactions, echo=False):
     )
 
 
-def construct_network(dataset='IBM', type_dataset=None):
+def construct_network(dataset='AMLWorld', type_dataset=None):
     transactions = load_transactions(dataset, type_dataset=type_dataset)
     transactions_agg = transactions.groupby(['from_account', 'to_account']).agg({
         'amount': ['sum', 'count']
@@ -57,7 +57,7 @@ def construct_network(dataset='IBM', type_dataset=None):
     return G, labels
 
 
-def load_network_time(start_date, end_date, dataset='IBM', type_dataset=None, echo=False, days_echo=3):
+def load_network_time(start_date, end_date, dataset='AMLWorld', type_dataset=None, echo=False, days_echo=3):
     transactions = load_transactions(dataset, type_dataset=type_dataset)
 
     if echo:
@@ -100,7 +100,7 @@ def load_network_time(start_date, end_date, dataset='IBM', type_dataset=None, ec
     return G, labels
 
 
-def construct_network_time(start_dates, end_dates, dataset='IBM', type_dataset=None, echo=False, days_echo=3):
+def construct_network_time(start_dates, end_dates, dataset='AMLWorld', type_dataset=None, echo=False, days_echo=3):
     networks = []
     for start_date, end_date in zip(start_dates, end_dates):
         G, labels = load_network_time(start_date, end_date, dataset=dataset, type_dataset=type_dataset, echo=echo, days_echo=days_echo)

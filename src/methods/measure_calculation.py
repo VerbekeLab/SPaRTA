@@ -103,7 +103,7 @@ if __name__ == "__main__":
         echo = data_config[network]['network_construction']['echo']
         days_echo = data_config[network]['network_construction']['days_echo']
 
-    if network in ('IBM', 'AMLSim', 'Tide'):
+    if network in ('AMLWorld', 'AMLSim', 'Tide'):
         if dynamic:
             start_dates, end_dates = define_dates(
                 load_transactions(network, type_dataset=type_dataset)['timestamp'],

@@ -17,6 +17,6 @@ def load_transactions_amlsim():
     )
     transactions = transactions.rename(columns=AMLSIM_COLUMN_MAP)
     # AMLSim TIMESTAMP is an integer step; treat it as days from epoch so the
-    # same datetime-based filtering and decay logic works as for IBM.
+    # same datetime-based filtering and decay logic works as for AMLWorld.
     transactions['timestamp'] = pd.to_datetime(transactions['timestamp'], unit='D')
     return transactions

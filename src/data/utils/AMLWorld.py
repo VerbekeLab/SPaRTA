@@ -1,6 +1,6 @@
 import pandas as pd
 
-IBM_COLUMN_MAP = {
+AMLWORLD_COLUMN_MAP = {
     'Account': 'from_account',
     'Account.1': 'to_account',
     'Timestamp': 'timestamp',
@@ -47,7 +47,7 @@ USD_EXCHANGE_RATES = {
     'CNY': 6.6976       # Chinese Yuan
 }
 
-def load_transactions_ibm(type_dataset='HI-Small'):
+def load_transactions_amlworld(type_dataset='HI-Small'):
     dtype = {
                 'Timestamp': 'object',
                 'From Bank': 'object',
@@ -63,13 +63,13 @@ def load_transactions_ibm(type_dataset='HI-Small'):
             }
 
     transactions = pd.read_csv(
-        f'./data/IBM/{type_dataset}_Trans.csv',
+        f'./data/AMLWorld/{type_dataset}_Trans.csv',
         dtype=dtype
     )
-    transactions = transactions.rename(columns=IBM_COLUMN_MAP)
+    transactions = transactions.rename(columns=AMLWORLD_COLUMN_MAP)
     transactions = transactions[transactions['from_account'] != transactions['to_account']]
     rate = transactions['Payment Currency'].map(EXCHANGE_NAME_TO_CODE).map(USD_EXCHANGE_RATES)
-    assert not rate.isna().any(), "unknown currency in IBM transactions"
+    assert not rate.isna().any(), "unknown currency in AMLWorld transactions"
     transactions['amount'] = transactions['amount'] / rate
     transactions['timestamp'] = pd.to_datetime(transactions['timestamp'], format='%Y/%m/%d %H:%M')
     transactions = transactions[transactions['timestamp'] <= '2022-09-11']

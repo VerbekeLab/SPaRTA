@@ -65,7 +65,7 @@ defaults:
       scale_labels:     {low: 0, high: 100000, step: 100}
       learning_rate:    [0.00001, 0.0001, 0.001, 0.01]
 
-IBM:
+AMLWorld:
   features_NN:
     <<: *features_NN
   features_XGBoost:

@@ -58,7 +58,7 @@ def load_transactions_tide(type_dataset='HI'):
     # (e.g. '...:15.446144'); ISO8601 parses both shapes.
     transactions['timestamp'] = pd.to_datetime(transactions['timestamp'], format='ISO8601')
     # is_laundering reads back as object-dtype Python bools (the ownership rows
-    # leave blanks in the column); normalise to a clean boolean like IBM/AMLSim.
+    # leave blanks in the column); normalise to a clean boolean like AMLWorld/AMLSim.
     transactions['is_laundering'] = transactions['is_laundering'].astype(bool)
 
     return transactions

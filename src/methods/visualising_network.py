@@ -128,7 +128,7 @@ n_cpu = min(4, cpu_count() // 2)
 
 if __name__ == "__main__":
     os.makedirs('results/pickle', exist_ok=True)
-    G, labels = construct_network(dataset='IBM')
+    G, labels = construct_network(dataset='AMLWorld')
     G = graph_degree_abs(G, degree_cutoff=20)
     G = ig.Graph.from_networkx(G)
 

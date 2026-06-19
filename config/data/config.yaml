@@ -2,7 +2,7 @@ parameters:
   dataset: 'AMLSim'
   time_dynamic: True
 
-IBM:
+AMLWorld:
   type_dataset: 'HI-Small'
   n_channels: 10 # channels after aggregation
   network_construction:
