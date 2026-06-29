@@ -1,4 +1,4 @@
-experiment: 'features_NN' # 'features_NN', 'features_XGBoost', 'features_CNN', or 'timeseries'
+experiment: 'features_NN' # 'features_NN', 'features_XGBoost', 'features_CNN', 'timeseries', or 'baselines'
 
 # ---------------------------------------------------------------------------
 # Default hyperparameters and tuning search spaces, defined once here and
@@ -70,13 +70,11 @@ defaults:
   # suggest_param (see src/utils/setup.py): a list -> categorical, a
   # {low, high, step?} dict -> suggest_int, add `type: float` (+ optional `log`)
   # for suggest_float. `d_model = head_dim * nhead`, so it is always divisible
-  # by nhead. `alpha`/`gamma` apply only when `loss` is 'focal'. The XGBoost
-  # baseline gets its own minimal tuning via `xgb_search_space`. `storage`
+  # by nhead. `alpha`/`gamma` apply only when `loss` is 'focal'. `storage`
   # persists the study to SQLite (see features_CNN) so array tasks can resume.
   timeseries: &timeseries
     data_directory: 'results/features/'
     n_trials: 30             # Optuna budget per sequence-model architecture (LSTM, Transformer)
-    xgb_n_trials: 20         # the XGBoost baseline's own, separate (small) Optuna budget
     storage: null            # set sqlite:///results/tuning/optuna_{dataset}.db to resume/share
     search_space:
       hidden:      {low: 16, high: 128, step: 16}
@@ -90,11 +88,23 @@ defaults:
       loss:        ['bce', 'focal']
       alpha:       {low: 0.5, high: 0.95, step: 0.05, type: float}   # focal only
       gamma:       [0.0, 1.0, 2.0]                                   # focal only
+
+  # Non-sequential baselines (scripts/experiment_baseline.py) — XGBoost + IsolationForest
+  # on the same K-snapshot windows the sequence models use. XGBoost is tuned with a small
+  # Optuna search on the val band; IsolationForest is unsupervised, so its params are
+  # fixed (no labels to tune against). Decoupled from `timeseries` so each can evolve
+  # independently and so additional non-baseline, non-sequential methods can slot in.
+  baselines: &baselines
+    data_directory: 'results/features/'
+    n_trials: 20             # XGBoost Optuna budget (IsolationForest is not searched)
     xgb_search_space:
       max_depth:    {low: 3, high: 8}
       eta:          [0.01, 0.05, 0.1, 0.2]
       subsample:    {low: 0.6, high: 1.0, step: 0.2, type: float}
       n_estimators: {low: 100, high: 400, step: 100}
+    iforest:
+      n_estimators: 200
+      max_samples: 'auto'
 
 AMLWorld:
   features_NN:
@@ -105,6 +115,8 @@ AMLWorld:
     <<: *features_CNN
   timeseries:
     <<: *timeseries
+  baselines:
+    <<: *baselines
 
 AMLSim:
   features_NN:
@@ -115,6 +127,8 @@ AMLSim:
     <<: *features_CNN
   timeseries:
     <<: *timeseries
+  baselines:
+    <<: *baselines
 
 Tide:
   features_NN:
@@ -125,3 +139,5 @@ Tide:
     <<: *features_CNN
   timeseries:
     <<: *timeseries
+  baselines:
+    <<: *baselines

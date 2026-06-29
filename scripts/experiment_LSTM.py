@@ -1,16 +1,15 @@
-# Time-series experiment: LSTM + Transformer over K-snapshot windows, with an
-# XGBoost baseline on the same features. Mirrors the notebooks/test_timeseries.ipynb
-# flow, ported to the temporal (anchor-band) split. Per architecture we run an
-# Optuna study (maximise val-band AUC-PR), train the best config on train with
-# early-stop on the val band, then score the held-out test band. Minimalist style;
-# heavy work lives under __main__ so the module functions stay importable.
+# Time-series experiment: LSTM + Transformer over K-snapshot windows. Per architecture
+# we run an Optuna study (maximise val-band AUC-PR), train the best config on train with
+# early-stop on the val band, then score the held-out test band. The non-sequential
+# baselines (XGBoost, IsolationForest) live in scripts/experiment_baseline.py, so this
+# script focuses on sequence models only — run that script for the baselines on the
+# same windowed dataset. Minimalist style; heavy work lives under __main__.
 import os
 import sys
 DIR = "./"
 os.chdir(DIR)
 sys.path.append(DIR)
 
-import xgboost as xgb            # import xgboost BEFORE torch (OpenMP segfault otherwise)
 import numpy as np
 import torch
 from torch.utils.data import TensorDataset, DataLoader
@@ -99,47 +98,6 @@ def train_model(model, train_tensors, val_tensors, device, loss="bce", lr=1e-3,
     return best_ap, best_state
 
 
-def run_xgb_baseline(Xtr2d, ytr, Xval2d, yval, Xte2d, search_space, seed=1997, n_trials=20):
-    """XGBoost on already-2D feature arrays. Minimal Optuna tuning of AUC-PR on the
-    (Xval2d, yval) band only (no CV shuffle). Returns (probs_te, best_params).
-    Imbalance via scale_pos_weight (mirrors the bce pos_weight). n_trials is the
-    baseline's own (deliberately small) budget, separate from the sequence-model studies."""
-    from xgboost import XGBClassifier
-
-    spw = (ytr == 0).sum() / max(1, (ytr == 1).sum())
-
-    def objective(trial):
-        params = {name: suggest_param(trial, name, spec) for name, spec in search_space.items()}
-        clf = XGBClassifier(eval_metric="aucpr", scale_pos_weight=spw,
-                            random_state=seed, **params)
-        clf.fit(Xtr2d, ytr)
-        pv = clf.predict_proba(Xval2d)[:, 1]
-        return average_precision_score(yval, pv) if yval.sum() else 0.0
-
-    sampler = optuna.samplers.TPESampler(seed=seed)
-    study = optuna.create_study(direction="maximize", sampler=sampler)
-    study.optimize(objective, n_trials=n_trials)
-    best_params = study.best_params
-
-    clf = XGBClassifier(eval_metric="aucpr", scale_pos_weight=spw,
-                        random_state=seed, **best_params)
-    clf.fit(Xtr2d, ytr)
-    return clf.predict_proba(Xte2d)[:, 1], best_params
-
-
-def _xgb_arrays(X, K, task):
-    """Per-task 2D feature arrays from the RAW (unscaled) windows.
-    nowcast  -> anchor step (K-1) only, 90 feats.
-    forecast -> ALL K window steps flattened (K*90). The forecast window [a-K..a-1]
-    already excludes the anchor (the builder offsets base=a-K), so every step is
-    history; XGBoost must see the same K-step history the sequence models do — slicing
-    it shorter would silently handicap the baseline and confound the sequential-vs-not
-    comparison this task exists to make."""
-    if task == "nowcast":
-        return X[:, K - 1, :]
-    return X.reshape(X.shape[0], -1)
-
-
 def _tune_arch(arch, study_name, storage, n_trials, search_space, n_features,
                train_tensors, val_tensors, device, pos_weight):
     """One Optuna study for an architecture: maximise val-band AUC-PR via
@@ -188,9 +146,7 @@ if __name__ == "__main__":
 
     ts_cfg = method_config[dataset]["timeseries"]
     search_space = ts_cfg["search_space"]
-    xgb_search_space = ts_cfg["xgb_search_space"]
     n_trials = ts_cfg["n_trials"]
-    xgb_n_trials = ts_cfg.get("xgb_n_trials", 20)   # baseline's own small, separate budget
     storage = ts_cfg.get("storage")
     if storage:
         storage = storage.format(dataset=type_dataset)
@@ -262,17 +218,6 @@ if __name__ == "__main__":
             {"state_dict": model.state_dict(), "mu": mu, "sd": sd,
              "arch": arch, "best_params": best_params, "K": K, "task": task},
             f"results/models/{study_name}{suffix}.pt")
-
-    # --- XGBoost baseline on the RAW (unscaled) per-task 2D arrays. _band kept any
-    # node with >=1 valid step across the K-window, and _xgb_arrays spans all K steps
-    # (forecast) / the anchor step (nowcast), so every kept node carries real features.
-    Xtr2d = _xgb_arrays(X[train_idx], K, task)
-    Xval2d = _xgb_arrays(X[val_idx], K, task)
-    Xte2d = _xgb_arrays(X[test_idx], K, task)
-    xgb_probs, xgb_best = run_xgb_baseline(
-        Xtr2d, ytr, Xval2d, y[val_idx], Xte2d, xgb_search_space, seed=SEED, n_trials=xgb_n_trials)
-    scores["XGBoost"] = xgb_probs
-    best_params_all["XGBoost"] = {"best_params": xgb_best}
 
     # --- Persist best params, metrics, and the ROC/PR comparison figure.
     with open(f"results/tuning/timeseries_{type_dataset}_{task}{suffix}_best_params.json", "w") as f:
