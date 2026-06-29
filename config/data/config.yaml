@@ -2,6 +2,23 @@ parameters:
   dataset: 'AMLSim'
   time_dynamic: True
 
+# ---------------------------------------------------------------------------
+# Default time-series sequence settings, defined once here and shared across
+# datasets via a YAML anchor (&sequence) + alias (*sequence). To configure a
+# single dataset differently, override the field inside its block, e.g.:
+#     AMLWorld:
+#       sequence:
+#         <<: *sequence
+#         K: 5                  # everything else inherited from the default
+# The `defaults` key itself is not read by any script; it only holds the anchor.
+# ---------------------------------------------------------------------------
+defaults:
+  sequence: &sequence
+    K: 3                 # sliding-window length
+    task: nowcast        # nowcast | forecast
+    n_test_anchors: 1    # latest anchors held out for test
+    n_val_anchors: 1     # band before test, used for Optuna/early-stop
+
 AMLWorld:
   type_dataset: 'HI-Small'
   n_channels: 10 # channels after aggregation
@@ -11,6 +28,7 @@ AMLWorld:
     time_step: 1
     time_width: 1
     time_type: 'days'
+  sequence: *sequence
 
 AMLSim:
   type_dataset: 'AMLSim'
@@ -21,6 +39,7 @@ AMLSim:
     time_step: 1
     time_width: 1
     time_type: 'days'
+  sequence: *sequence
 
 Tide:
   type_dataset: 'HI' # 'HI' (higher illicit ratio) or 'LI' (lower illicit ratio) -> reads data/Tide/generated_edges_<type>.csv
@@ -31,3 +50,4 @@ Tide:
     time_step: 1
     time_width: 1
     time_type: 'days'
+  sequence: *sequence
