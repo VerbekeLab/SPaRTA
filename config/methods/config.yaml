@@ -1,4 +1,4 @@
-experiment: 'features_NN' # 'features_NN', 'features_XGBoost', or 'features_CNN'
+experiment: 'features_NN' # 'features_NN', 'features_XGBoost', 'features_CNN', or 'timeseries'
 
 # ---------------------------------------------------------------------------
 # Default hyperparameters and tuning search spaces, defined once here and
@@ -65,6 +65,37 @@ defaults:
       scale_labels:     {low: 0, high: 100000, step: 100}
       learning_rate:    [0.00001, 0.0001, 0.001, 0.01]
 
+  # Sequence models (LSTM / Transformer) over K-snapshot windows, tuned with
+  # Optuna against the temporal val-band AUC-PR. `search_space` is consumed by
+  # suggest_param (see src/utils/setup.py): a list -> categorical, a
+  # {low, high, step?} dict -> suggest_int, add `type: float` (+ optional `log`)
+  # for suggest_float. `d_model = head_dim * nhead`, so it is always divisible
+  # by nhead. `alpha`/`gamma` apply only when `loss` is 'focal'. The XGBoost
+  # baseline gets its own minimal tuning via `xgb_search_space`. `storage`
+  # persists the study to SQLite (see features_CNN) so array tasks can resume.
+  timeseries: &timeseries
+    data_directory: 'results/features/'
+    n_trials: 30             # Optuna budget per sequence-model architecture (LSTM, Transformer)
+    xgb_n_trials: 20         # the XGBoost baseline's own, separate (small) Optuna budget
+    storage: null            # set sqlite:///results/tuning/optuna_{dataset}.db to resume/share
+    search_space:
+      hidden:      {low: 16, high: 128, step: 16}
+      num_layers:  {low: 1, high: 3}
+      head_dim:    {low: 4, high: 16, step: 4}
+      nhead:       {low: 1, high: 8}          # d_model = head_dim * nhead (always divisible by nhead)
+      dropout:     {low: 0.0, high: 0.5, step: 0.1, type: float}
+      lr:          [0.0001, 0.001, 0.01]
+      batch_size:  [16, 32, 64]
+      epochs:      {low: 50, high: 300, step: 50}
+      loss:        ['bce', 'focal']
+      alpha:       {low: 0.5, high: 0.95, step: 0.05, type: float}   # focal only
+      gamma:       [0.0, 1.0, 2.0]                                   # focal only
+    xgb_search_space:
+      max_depth:    {low: 3, high: 8}
+      eta:          [0.01, 0.05, 0.1, 0.2]
+      subsample:    {low: 0.6, high: 1.0, step: 0.2, type: float}
+      n_estimators: {low: 100, high: 400, step: 100}
+
 AMLWorld:
   features_NN:
     <<: *features_NN
@@ -72,6 +103,8 @@ AMLWorld:
     <<: *features_XGBoost
   features_CNN:
     <<: *features_CNN
+  timeseries:
+    <<: *timeseries
 
 AMLSim:
   features_NN:
@@ -80,6 +113,8 @@ AMLSim:
     <<: *features_XGBoost
   features_CNN:
     <<: *features_CNN
+  timeseries:
+    <<: *timeseries
 
 Tide:
   features_NN:
@@ -88,3 +123,5 @@ Tide:
     <<: *features_XGBoost
   features_CNN:
     <<: *features_CNN
+  timeseries:
+    <<: *timeseries
