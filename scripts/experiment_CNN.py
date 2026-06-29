@@ -111,8 +111,8 @@ if __name__ == "__main__":
     SEARCH_SPACE = cnn_cfg['search_space']
     NUM_CHANNELS = num_channels
 
-    data = load_data(f"results/features/{type_dataset}_static_features_t.csv",
-                   f"results/features/{type_dataset}_static_labels_t.csv")
+    data = load_data(f"results/features/{type_dataset}_static_features.csv",
+                   f"results/features/{type_dataset}_static_labels.csv")
     
     X = data.drop(columns=['is_laundering'])
     y = data['is_laundering']

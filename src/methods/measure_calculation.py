@@ -119,11 +119,11 @@ if __name__ == "__main__":
                 df = process_graph(G)
 
                 if echo:
-                    out_path_features = f"results/features/{type_dataset}_dynamic_{i}_features_echo_t.csv"
-                    out_path_labels = f"results/features/{type_dataset}_dynamic_{i}_labels_echo_t.csv"
+                    out_path_features = f"results/features/{type_dataset}_dynamic_{i}_features_echo.csv"
+                    out_path_labels = f"results/features/{type_dataset}_dynamic_{i}_labels_echo.csv"
                 else:
-                    out_path_features = f"results/features/{type_dataset}_dynamic_{i}_features_t.csv"
-                    out_path_labels = f"results/features/{type_dataset}_dynamic_{i}_labels_t.csv"
+                    out_path_features = f"results/features/{type_dataset}_dynamic_{i}_features.csv"
+                    out_path_labels = f"results/features/{type_dataset}_dynamic_{i}_labels.csv"
 
                 df.to_csv(out_path_features, index=False)
                 print(f"Results saved to {out_path_features}")
@@ -136,10 +136,10 @@ if __name__ == "__main__":
             G, labels = construct_network(dataset=network, type_dataset=type_dataset)
             df = process_graph(G)
 
-            out_path_features = f"results/features/{type_dataset}_static_features_t.csv"
+            out_path_features = f"results/features/{type_dataset}_static_features.csv"
             df.to_csv(out_path_features, index=False)
             print(f"Results saved to {out_path_features}")
-            out_path_labels = f"results/features/{type_dataset}_static_labels_t.csv"
+            out_path_labels = f"results/features/{type_dataset}_static_labels.csv"
             labels.to_csv(out_path_labels)
             print(f"Labels saved to {out_path_labels}")
 
