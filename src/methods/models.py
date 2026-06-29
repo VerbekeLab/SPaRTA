@@ -1,3 +1,5 @@
+import math
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -137,3 +139,58 @@ class CNN_visual_VGG16(nn.Module):
         x = self.fc3(x)
 
         return x.squeeze()
+
+# --- Time-series models (SPaRTA snapshots) --------------------------------
+class PositionalEncoding(nn.Module):
+    def __init__(self, d_model, max_len=512):
+        super().__init__()
+        pe = torch.zeros(max_len, d_model)
+        pos = torch.arange(max_len).unsqueeze(1).float()
+        div = torch.exp(torch.arange(0, d_model, 2).float() * (-math.log(10000.0) / d_model))
+        pe[:, 0::2] = torch.sin(pos * div)
+        pe[:, 1::2] = torch.cos(pos * div)
+        self.register_buffer("pe", pe.unsqueeze(0))   # (1, max_len, d_model)
+
+    def forward(self, x):
+        return x + self.pe[:, : x.size(1)]
+
+
+class LSTMClassifier(nn.Module):
+    def __init__(self, n_features=90, hidden=32, num_layers=1, dropout=0.3):
+        super().__init__()
+        self.lstm = nn.LSTM(n_features, hidden, num_layers, batch_first=True,
+                            dropout=(dropout if num_layers > 1 else 0.0))
+        self.drop = nn.Dropout(dropout)           # regularize the last-step hidden state
+        self.head = nn.Linear(hidden, 1)
+
+    def forward(self, x, mask):                  # x:(B,T,F)  mask:(B,T) bool
+        out, _ = self.lstm(x)                     # (B,T,H); padded steps fed as zeros
+        last = mask.float().cumsum(1).argmax(1)   # index of the last valid (True) step
+        idx = last.view(-1, 1, 1).expand(-1, 1, out.size(-1))
+        h = out.gather(1, idx).squeeze(1)         # (B,H) hidden state at last valid step
+        return self.head(self.drop(h)).squeeze(-1)
+
+
+class TransformerClassifier(nn.Module):
+    def __init__(self, n_features=90, head_dim=8, nhead=4, num_layers=1,
+                 dim_feedforward=None, dropout=0.2):
+        super().__init__()
+        d_model = head_dim * nhead                # ensures d_model % nhead == 0
+        self.proj = nn.Linear(n_features, d_model)
+        self.pe = PositionalEncoding(d_model)
+        layer = nn.TransformerEncoderLayer(d_model, nhead,
+                                           dim_feedforward=(dim_feedforward or 2 * d_model),
+                                           dropout=dropout, batch_first=True)
+        # enable_nested_tensor=False: the padding-mask nested-tensor fast path uses an op
+        # (_nested_tensor_from_mask_left_aligned) unimplemented on MPS, so eval() forward
+        # crashes on Apple Silicon. Disabling it costs nothing for tiny K and runs everywhere.
+        self.encoder = nn.TransformerEncoder(layer, num_layers, enable_nested_tensor=False)
+        self.drop = nn.Dropout(dropout)                   # regularize the pooled representation
+        self.head = nn.Linear(d_model, 1)
+
+    def forward(self, x, mask):                       # mask:(B,T) True = valid
+        h = self.pe(self.proj(x))
+        h = self.encoder(h, src_key_padding_mask=~mask)   # True = ignore this position
+        m = mask.float().unsqueeze(-1)
+        h = (h * m).sum(1) / m.sum(1).clamp(min=1)        # mean-pool over valid tokens
+        return self.head(self.drop(h)).squeeze(-1)
