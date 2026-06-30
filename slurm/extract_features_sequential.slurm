@@ -3,10 +3,18 @@
 #
 # Use this instead of extract_features.slurm when you cannot hold all three raw
 # datasets on disk simultaneously. The array throttle `%1` forces Slurm to run a
-# single task at a time, and the stage-in / stage-out hooks copy in one dataset's
-# raw files, extract its features, then delete the raw files before the next task
-# starts. Peak disk usage is therefore ONE raw dataset (the small per-dataset
-# feature CSVs in results/features/ accumulate harmlessly).
+# single task at a time. For each task the stage-in hook SYMLINKS one dataset's
+# raw files into data/<subdir> from an external archive, extracts its features,
+# then removes the symlink before the next task starts. Peak disk usage is
+# therefore ONE raw dataset (the small per-dataset feature CSVs in
+# results/features/ accumulate harmlessly).
+#
+# Why a symlink and not a copy: CLAUDE.md marks data/ read-only ("never write,
+# rename, or regenerate inside data/"). A symlink keeps the actual raw files in
+# your external archive (STAGE_ROOT) and leaves data/ holding only a transient
+# link that this script also removes -- no vendor files or generated artefacts
+# are ever written into data/. If data/<subdir> already exists as a real
+# directory, staging is skipped and the rule is trivially respected.
 #
 # CPU job — measure_calculation uses a multiprocessing Pool, not the GPU.
 
@@ -45,29 +53,34 @@ export SPARTA_DATASET="${DATASETS[$SLURM_ARRAY_TASK_ID]}"
 declare -A DATA_SUBDIR=( [AMLWorld]=AMLWorld [AMLSim]=amlsim [Tide]=Tide )
 SUBDIR="${DATA_SUBDIR[$SPARTA_DATASET]}"
 
-# <<< EDIT >>> Where your raw datasets live when NOT staged (archive / $VSC_DATA
-# / scratch). Leave STAGE_ROOT empty to disable staging entirely (i.e. you have
-# already placed the data under data/<subdir>/ yourself).
+# <<< EDIT >>> Archive that holds your raw datasets as data/<subdir>-shaped
+# folders (e.g. $VSC_DATA/sparta_raw/{AMLWorld,amlsim,Tide}). Leave STAGE_ROOT
+# empty to disable staging entirely -- then you are responsible for having one
+# dataset present under data/<subdir>/ before submitting.
 STAGE_ROOT=""                                         # e.g. "$VSC_DATA/sparta_raw"
 
 echo "[$(date)] extracting features for SPARTA_DATASET=$SPARTA_DATASET (data/$SUBDIR)"
 
-# --- stage in -------------------------------------------------------------
+# --- stage in (symlink only; never copies into the read-only data/) -------
+STAGED_LINK=""
 if [[ -n "$STAGE_ROOT" ]]; then
-    echo "[$(date)] staging in $STAGE_ROOT/$SUBDIR -> data/$SUBDIR"
-    mkdir -p "data/$SUBDIR"
-    cp -r "$STAGE_ROOT/$SUBDIR/." "data/$SUBDIR/"
+    if [[ -e "data/$SUBDIR" && ! -L "data/$SUBDIR" ]]; then
+        echo "[$(date)] data/$SUBDIR already present as a real dir; skipping stage-in"
+    else
+        echo "[$(date)] linking $STAGE_ROOT/$SUBDIR -> data/$SUBDIR"
+        ln -sfn "$STAGE_ROOT/$SUBDIR" "data/$SUBDIR"
+        STAGED_LINK="data/$SUBDIR"
+    fi
 fi
 
 # --- extract --------------------------------------------------------------
 # Run from the repo root (the scripts assume os.chdir('./')).
 python src/methods/measure_calculation.py
 
-# --- stage out ------------------------------------------------------------
-# Only remove what we staged in; never touch data/ if staging is disabled.
-if [[ -n "$STAGE_ROOT" ]]; then
-    echo "[$(date)] removing staged raw data data/$SUBDIR to free disk for the next dataset"
-    rm -rf "data/$SUBDIR"
+# --- stage out (remove only the symlink we created; vendor files untouched)
+if [[ -n "$STAGED_LINK" ]]; then
+    echo "[$(date)] removing transient symlink $STAGED_LINK"
+    rm -f "$STAGED_LINK"
 fi
 
 echo "[$(date)] done $SPARTA_DATASET; features in results/features/"

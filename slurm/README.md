@@ -30,7 +30,7 @@ Every script has a block marked `# <<< EDIT >>>`. Fill in for your VSC cluster:
 
 ```bash
 # from the repo root
-sbatch slurm/extract_features.slurm     # CPU: build 3x3 features for all datasets
+sbatch slurm/extract_features.slurm     # CPU: build 3x3 features for all datasets (parallel array)
 sbatch slurm/train_features.slurm       # CPU: LogReg + XGBoost + NN on the features
 sbatch slurm/train_cnn.slurm            # GPU: CNN + Optuna HPO on the 3x3 pictures
 sbatch slurm/train_baseline.slurm       # CPU: XGBoost + IsolationForest on the K-snapshot windows
@@ -41,6 +41,33 @@ sbatch slurm/train_lstm.slurm           # GPU: LSTM + Transformer + Optuna HPO o
 `results/features/`). For the time-series scripts you also need
 `time_dynamic: True` (+ `echo: True`) in `config/data/config.yaml` so the
 per-snapshot dynamic CSVs get written.
+
+## Limited disk: extract one dataset at a time
+
+`extract_features.slurm` uses `--array=0-2` (all three tasks run **in parallel**),
+so all three raw datasets must sit under `data/` at once. If you cannot hold them
+simultaneously, use **`extract_features_sequential.slurm`** instead:
+
+```bash
+sbatch slurm/extract_features_sequential.slurm   # CPU: build features, one dataset at a time
+```
+
+It differs in two ways:
+
+- `--array=0-2%1` — the `%1` throttle runs a single dataset task at a time, so
+  only one dataset is on disk at any moment.
+- A **symlink** stage-in/stage-out: each task links one dataset's raw files from an
+  external archive into `data/<subdir>`, extracts, then removes the link. Because
+  `data/` is read-only (no vendor files or artefacts are ever written there — only
+  a transient symlink), this respects the project's hard rule. Set `STAGE_ROOT` to
+  your archive path (datasets laid out as `AMLWorld/`, `amlsim/`, `Tide/`).
+
+If you'd rather stage manually, leave `STAGE_ROOT=""`: put one dataset under
+`data/<subdir>/` yourself, `sbatch` the script (or just run
+`SPARTA_DATASET=<name> python src/methods/measure_calculation.py`), swap in the
+next dataset, repeat. Feature CSVs are namespaced by dataset
+(`results/features/HI-Small_*`, `AMLSim_*`, `HI_*`), so they never collide and the
+downstream training/analysis stays per-dataset.
 
 ## Running the time-series experiment and its baselines in parallel
 
