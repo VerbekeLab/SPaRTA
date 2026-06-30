@@ -29,7 +29,10 @@ def define_ML_labels(transactions):
     )
     transactions_labels = pd.concat([transactions_from, transactions_to], axis=0)
 
-    accounts_labelled = transactions_labels.groupby('from_account').mean()
+    # observed=True so a time-windowed slice of categorical account IDs (Tide
+    # Parquet) labels only the accounts actually present, not every category;
+    # a no-op for object-dtype loaders.
+    accounts_labelled = transactions_labels.groupby('from_account', observed=True).mean()
     accounts_labelled['is_laundering'] = (accounts_labelled['is_laundering'] > 0) * 1
     accounts_labelled.index.name = 'Account'
     return accounts_labelled
@@ -47,7 +50,9 @@ def load_network(transactions, echo=False):
 
 def construct_network(dataset='AMLWorld', type_dataset=None):
     transactions = load_transactions(dataset, type_dataset=type_dataset)
-    transactions_agg = transactions.groupby(['from_account', 'to_account']).agg({
+    # observed=True so categorical account IDs (Tide Parquet) don't expand to the
+    # full ID×ID cartesian product; a no-op for object-dtype loaders.
+    transactions_agg = transactions.groupby(['from_account', 'to_account'], observed=True).agg({
         'amount': ['sum', 'count']
         }).reset_index()
 
@@ -72,7 +77,7 @@ def load_network_time(start_date, end_date, dataset='AMLWorld', type_dataset=Non
         gamma = -np.log(0.01) / days_echo
         delta_days = ((end_date - transactions_time_filtered['timestamp']) // pd.Timedelta(seconds=1)) / (3600 * 24)
         transactions_time_filtered['decay'] = np.exp(-gamma * delta_days)
-        transactions_time_filtered_agg = transactions_time_filtered.groupby(['from_account', 'to_account']).agg({
+        transactions_time_filtered_agg = transactions_time_filtered.groupby(['from_account', 'to_account'], observed=True).agg({
             'decay': 'max',
             'amount': ['sum', 'count']
             }).reset_index()
@@ -89,7 +94,7 @@ def load_network_time(start_date, end_date, dataset='AMLWorld', type_dataset=Non
             (transactions['timestamp'] < end_date)
         ]
 
-        transactions_time_filtered_agg = transactions_time_filtered.groupby(['from_account', 'to_account']).agg({
+        transactions_time_filtered_agg = transactions_time_filtered.groupby(['from_account', 'to_account'], observed=True).agg({
             'amount': ['sum', 'count']
             }).reset_index()
 

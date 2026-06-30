@@ -1,3 +1,5 @@
+import os
+
 import pandas as pd
 
 TIDE_COLUMN_MAP = {
@@ -31,6 +33,22 @@ USD_EXCHANGE_RATES = {
 
 
 def load_transactions_tide(type_dataset='HI'):
+    """Return the canonical Tide transaction frame.
+
+    The raw ``generated_edges_{type}.csv`` is ~900 MB of mostly-unused columns.
+    A pre-processed Parquet (built by ``scripts/convert_tide_to_parquet.py``)
+    holds exactly the canonical schema this loader produces and is ~10x smaller
+    on disk and in RAM — important on the VSC cluster. Prefer it when present;
+    otherwise parse the CSV with the original logic so the repo still works from
+    the raw files alone. Both paths return identical values.
+    """
+    parquet_path = f'./data/Tide/generated_edges_{type_dataset}.parquet'
+    if os.path.exists(parquet_path):
+        return pd.read_parquet(parquet_path)
+    return _load_transactions_tide_from_csv(type_dataset=type_dataset)
+
+
+def _load_transactions_tide_from_csv(type_dataset='HI'):
     columns = list(TIDE_COLUMN_MAP.keys()) + ['currency', 'edge_type']
     transactions = pd.read_csv(
         f'./data/Tide/generated_edges_{type_dataset}.csv',
