@@ -13,19 +13,22 @@
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=8
-# <<< EDIT >>> cluster/partition/account for your VSC CPU allocation:
-#SBATCH --clusters=CHANGE_ME
-#SBATCH --partition=CHANGE_ME
-#SBATCH --account=CHANGE_ME
+
+#SBATCH --clusters=wice
+#SBATCH --partition=batch
+#SBATCH --account=lp_verbekelab
+
+#SBATCH --mail-type=ALL
+#SBATCH --mail-user bruno.deprez@kuleuven.be
 
 set -euo pipefail
 mkdir -p slurm/logs results/tuning results/experiments
 
-# <<< EDIT >>> environment setup for your cluster:
-CONDA_SH="$HOME/miniconda3/etc/profile.d/conda.sh"   # <<< EDIT >>> path to conda.sh
-ENV_NAME="SPaRTA_env"                                 # <<< EDIT >>> conda env name
-source "$CONDA_SH"
-conda activate "$ENV_NAME"
+cd $VSC_DATA/SPaRTA
+
+export PATH="${VSC_DATA}/miniconda3/bin:${PATH}"
+
+source activate SPaRTA_env
 
 # Match thread pools to the allocation so XGBoost / sklearn use the whole node
 # without over-subscribing it.
@@ -36,5 +39,6 @@ DATASETS=(AMLWorld AMLSim Tide)
 export SPARTA_DATASET="${DATASETS[$SLURM_ARRAY_TASK_ID]}"
 echo "[$(date)] baselines (XGBoost + IsolationForest) for SPARTA_DATASET=$SPARTA_DATASET"
 
-cd "$SLURM_SUBMIT_DIR"
-python scripts/experiment_baseline.py
+python -u scripts/experiment_baseline.py
+
+echo finish

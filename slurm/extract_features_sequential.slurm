@@ -24,26 +24,26 @@
 # `%1` = at most one array task running at once (sequential). Keep 0-2 in sync
 # with the DATASETS length (3 datasets -> 0-2).
 #SBATCH --array=0-2%1
-#SBATCH --time=04:00:00
+#SBATCH --time=16:00:00
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=8
-# <<< EDIT >>> cluster/partition/account for your VSC allocation:
-#SBATCH --clusters=CHANGE_ME
-#SBATCH --partition=CHANGE_ME
-#SBATCH --account=CHANGE_ME
+
+#SBATCH --clusters=wice
+#SBATCH --partition=batch
+#SBATCH --account=lp_verbekelab
+
+#SBATCH --mail-type=ALL
+#SBATCH --mail-user bruno.deprez@kuleuven.be
 
 set -euo pipefail
 mkdir -p slurm/logs results/features
 
-# <<< EDIT >>> environment setup for your cluster:
-# module load cluster/wice/...      # e.g. a recent Python/CUDA stack if needed
-CONDA_SH="$HOME/miniconda3/etc/profile.d/conda.sh"   # <<< EDIT >>> path to conda.sh
-ENV_NAME="SPaRTA_env"                                 # <<< EDIT >>> conda env name
-source "$CONDA_SH"
-conda activate "$ENV_NAME"
+cd $VSC_DATA/SPaRTA
 
-cd "$SLURM_SUBMIT_DIR"
+export PATH="${VSC_DATA}/miniconda3/bin:${PATH}"
+
+source activate SPaRTA_env
 
 # Sweep list — keep --array range in sync with its length (3 -> 0-2).
 DATASETS=(AMLWorld AMLSim Tide)
@@ -75,7 +75,7 @@ fi
 
 # --- extract --------------------------------------------------------------
 # Run from the repo root (the scripts assume os.chdir('./')).
-python src/methods/measure_calculation.py
+python -u src/methods/measure_calculation.py
 
 # --- stage out (remove only the symlink we created; vendor files untouched)
 if [[ -n "$STAGED_LINK" ]]; then

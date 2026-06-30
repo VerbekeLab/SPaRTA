@@ -6,30 +6,32 @@
 #SBATCH --output=slurm/logs/extract_%A_%a.out
 #SBATCH --error=slurm/logs/extract_%A_%a.err
 #SBATCH --array=0-2
-#SBATCH --time=04:00:00
+#SBATCH --time=16:00:00
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=8
-# <<< EDIT >>> cluster/partition/account for your VSC allocation:
-#SBATCH --clusters=CHANGE_ME
-#SBATCH --partition=CHANGE_ME
-#SBATCH --account=CHANGE_ME
+
+#SBATCH --clusters=wice
+#SBATCH --partition=batch
+#SBATCH --account=lp_verbekelab
+
+#SBATCH --mail-type=ALL
+#SBATCH --mail-user bruno.deprez@kuleuven.be
 
 set -euo pipefail
 mkdir -p slurm/logs results/features
 
-# <<< EDIT >>> environment setup for your cluster:
-# module load cluster/wice/...      # e.g. a recent Python/CUDA stack if needed
-CONDA_SH="$HOME/miniconda3/etc/profile.d/conda.sh"   # <<< EDIT >>> path to conda.sh
-ENV_NAME="SPaRTA_env"                                 # <<< EDIT >>> conda env name
-source "$CONDA_SH"
-conda activate "$ENV_NAME"
+cd $VSC_DATA/SPaRTA
+
+export PATH="${VSC_DATA}/miniconda3/bin:${PATH}"
+
+source activate SPaRTA_env
 
 # Sweep list — keep --array range in sync with its length (3 -> 0-2).
 DATASETS=(AMLWorld AMLSim Tide)
 export SPARTA_DATASET="${DATASETS[$SLURM_ARRAY_TASK_ID]}"
 echo "[$(date)] extracting features for SPARTA_DATASET=$SPARTA_DATASET"
 
-# Run from the repo root (the scripts assume os.chdir('./')).
-cd "$SLURM_SUBMIT_DIR"
-python src/methods/measure_calculation.py
+python -u src/methods/measure_calculation.py
+
+echo finish
