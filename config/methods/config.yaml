@@ -89,19 +89,28 @@ defaults:
       alpha:       {low: 0.5, high: 0.95, step: 0.05, type: float}   # focal only
       gamma:       [0.0, 1.0, 2.0]                                   # focal only
 
-  # Non-sequential baselines (scripts/experiment_baseline.py) — XGBoost + IsolationForest
-  # on the same K-snapshot windows the sequence models use. XGBoost is tuned with a small
-  # Optuna search on the val band; IsolationForest is unsupervised, so its params are
-  # fixed (no labels to tune against). Decoupled from `timeseries` so each can evolve
-  # independently and so additional non-baseline, non-sequential methods can slot in.
+  # Non-sequential baselines (scripts/experiment_baseline.py) — XGBoost, a feed-forward MLP,
+  # and IsolationForest on the same K-snapshot windows the sequence models use. XGBoost and
+  # the MLP are each tuned with a small Optuna search on the val band (the MLP standardises
+  # its inputs and trains mini-batch with early stopping); IsolationForest is unsupervised,
+  # so its params are fixed (no labels to tune against). Decoupled from `timeseries` so each
+  # can evolve independently and so additional non-baseline, non-sequential methods can slot
+  # in. `nn_search_space` is consumed by suggest_param like the other search spaces
+  # (list -> categorical, {low, high, step?} -> suggest_int).
   baselines: &baselines
     data_directory: 'results/features/'
-    n_trials: 20             # XGBoost Optuna budget (IsolationForest is not searched)
+    n_trials: 20             # Optuna budget, shared by XGBoost and the MLP (IsolationForest is not searched)
     xgb_search_space:
       max_depth:    {low: 3, high: 8}
       eta:          [0.01, 0.05, 0.1, 0.2]
       subsample:    {low: 0.6, high: 1.0, step: 0.2, type: float}
       n_estimators: {low: 100, high: 400, step: 100}
+    nn_search_space:
+      hidden_size: {low: 16, high: 64, step: 16}
+      num_layers:  {low: 2, high: 4}
+      lr:          [0.0001, 0.001, 0.01]
+      batch_size:  [32, 64, 128]
+      epochs:      {low: 50, high: 200, step: 50}   # max_epochs cap; early stopping usually ends sooner
     iforest:
       n_estimators: 200
       max_samples: 'auto'

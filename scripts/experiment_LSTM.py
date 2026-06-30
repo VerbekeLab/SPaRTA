@@ -1,7 +1,7 @@
 # Time-series experiment: LSTM + Transformer over K-snapshot windows. Per architecture
 # we run an Optuna study (maximise val-band AUC-PR), train the best config on train with
 # early-stop on the val band, then score the held-out test band. The non-sequential
-# baselines (XGBoost, IsolationForest) live in scripts/experiment_baseline.py, so this
+# baselines (XGBoost, feed-forward MLP, IsolationForest) live in scripts/experiment_baseline.py, so this
 # script focuses on sequence models only — run that script for the baselines on the
 # same windowed dataset. Minimalist style; heavy work lives under __main__.
 import os

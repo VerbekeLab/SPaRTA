@@ -1,8 +1,9 @@
 # Non-sequential baselines on the same K-snapshot windows the sequence models use
-# (scripts/experiment_LSTM.py): a tuned XGBoost classifier and an unsupervised
-# Isolation Forest anomaly detector. Kept separate from the time-series models so
-# baselines and sequence experiments can evolve independently and so new (non-baseline,
-# non-sequential) methods can slot in beside them. Minimalist style; self-contained.
+# (scripts/experiment_LSTM.py): a tuned XGBoost classifier, a tuned feed-forward MLP, and
+# an unsupervised Isolation Forest anomaly detector. Kept separate from the time-series
+# models so baselines and sequence experiments can evolve independently and so new
+# (non-baseline, non-sequential) methods can slot in beside them. Minimalist style;
+# self-contained.
 import os
 import sys
 DIR = "./"
@@ -50,6 +51,92 @@ def run_xgb_baseline(Xtr2d, ytr, Xval2d, yval, Xte2d, search_space, seed=SEED, n
     return clf.predict_proba(Xte2d)[:, 1], best_params
 
 
+def run_nn_baseline(Xtr2d, ytr, Xval2d, yval, Xte2d, search_space, seed=SEED,
+                    n_trials=20, patience=20):
+    """Feed-forward MLP on the already-2D feature arrays. Light Optuna tuning of AUC-PR on
+    the (Xval2d, yval) band only — mirrors run_xgb_baseline. Two deliberate deviations from
+    the tree baselines: (1) features are standardised (StandardScaler fit on TRAIN only),
+    since an MLP — unlike tree/isolation splits — is scale-sensitive; (2) training is
+    mini-batch Adam with early stopping on val-band AUC-PR (mirrors experiment_LSTM.py).
+    Imbalance via BCEWithLogitsLoss pos_weight (= neg/pos, the same rule the sequence
+    models use). torch is imported lazily here (after the module-level xgboost import) to
+    keep the tree-only path light and preserve the xgboost-before-torch OpenMP order.
+    Returns (probs_te, best_params)."""
+    import torch
+    import torch.nn as nn
+    from torch.utils.data import TensorDataset, DataLoader
+    from sklearn.preprocessing import StandardScaler
+    from src.methods.models import NeuralNetwork
+
+    device = torch.device("cuda" if torch.cuda.is_available()
+                          else "mps" if torch.backends.mps.is_available() else "cpu")
+
+    # Standardise (fit on TRAIN only); the trees did not need this, the MLP does. Tensors
+    # are moved to the device once so the DataLoader yields device batches directly.
+    scaler = StandardScaler().fit(Xtr2d)
+    Xtr = torch.as_tensor(scaler.transform(Xtr2d), dtype=torch.float32).to(device)
+    Xval = torch.as_tensor(scaler.transform(Xval2d), dtype=torch.float32).to(device)
+    Xte = torch.as_tensor(scaler.transform(Xte2d), dtype=torch.float32).to(device)
+    ytr_np = np.asarray(ytr)
+    ytr_t = torch.as_tensor(ytr_np, dtype=torch.float32).to(device)
+    yval_np = np.asarray(yval)
+
+    input_size = Xtr.shape[1]
+    spw = (ytr_np == 0).sum() / max(1, (ytr_np == 1).sum())
+    pos_weight = torch.tensor([spw], dtype=torch.float32, device=device)
+
+    def _fit_predict(params, X_eval):
+        """Train an MLP (mini-batch Adam, early-stop on val-band AUC-PR, restore the best
+        state) and return (best_val_aucpr, P(positive) for X_eval). Seeded per call so
+        trials differ only by hyperparameters, not by weight init / batch order."""
+        torch.manual_seed(seed)
+        model = NeuralNetwork(num_layers=params["num_layers"], input_size=input_size,
+                              hidden_size=params["hidden_size"], output_size=1).to(device)
+        criterion = nn.BCEWithLogitsLoss(pos_weight=pos_weight)
+        opt = torch.optim.Adam(model.parameters(), lr=params["lr"], weight_decay=1e-5)
+        loader = DataLoader(TensorDataset(Xtr, ytr_t), batch_size=params["batch_size"],
+                            shuffle=True, generator=torch.Generator().manual_seed(seed))
+
+        best_ap, best_state, wait = -1.0, None, 0
+        for _ in range(params["epochs"]):    # 'epochs' is the max_epochs cap; patience usually ends sooner
+            model.train()
+            for xb, yb in loader:
+                opt.zero_grad()
+                criterion(model(xb).squeeze(-1), yb).backward()
+                opt.step()
+            model.eval()
+            with torch.no_grad():
+                pv = torch.sigmoid(model(Xval).squeeze(-1)).cpu().numpy()
+            ap = average_precision_score(yval_np, pv) if yval_np.sum() else 0.0
+            if ap > best_ap:
+                best_ap, wait = ap, 0
+                best_state = {k: v.detach().clone() for k, v in model.state_dict().items()}
+            else:
+                wait += 1
+                if wait >= patience:
+                    break
+        if best_state is not None:
+            model.load_state_dict(best_state)
+        model.eval()
+        with torch.no_grad():
+            probs = torch.sigmoid(model(X_eval).squeeze(-1)).cpu().numpy()
+        return best_ap, probs
+
+    def objective(trial):
+        params = {name: suggest_param(trial, name, spec) for name, spec in search_space.items()}
+        best_ap, _ = _fit_predict(params, Xval)
+        return best_ap
+
+    sampler = optuna.samplers.TPESampler(seed=seed)
+    study = optuna.create_study(direction="maximize", sampler=sampler)
+    study.optimize(objective, n_trials=n_trials)
+    best_params = study.best_params
+
+    # Refit the best config on train (early-stopped on val, as in run_xgb_baseline) and score test.
+    _, probs_te = _fit_predict(best_params, Xte)
+    return probs_te, best_params
+
+
 def run_iforest_baseline(Xtr2d, Xte2d, params=None, seed=SEED):
     """Unsupervised Isolation Forest anomaly baseline on the SAME 2D feature arrays as the
     XGBoost baseline. Ignores the labels: fits on train and ranks the test set by the anomaly
@@ -93,7 +180,8 @@ if __name__ == "__main__":
 
     bl_cfg = method_config[dataset]["baselines"]
     xgb_search_space = bl_cfg["xgb_search_space"]
-    n_trials = bl_cfg["n_trials"]            # XGBoost Optuna budget
+    nn_search_space = bl_cfg["nn_search_space"]
+    n_trials = bl_cfg["n_trials"]            # Optuna budget, shared by XGBoost and the MLP
     iforest_params = bl_cfg.get("iforest", {})
 
     suffix = "_echo" if echo else ""
@@ -138,6 +226,11 @@ if __name__ == "__main__":
     scores["XGBoost"], xgb_best = run_xgb_baseline(
         Xtr2d, ytr, Xval2d, yval, Xte2d, xgb_search_space, seed=SEED, n_trials=n_trials)
     best_params_all["XGBoost"] = {"best_params": xgb_best}
+
+    # --- Feed-forward MLP (supervised, tuned on the val band; standardised inputs).
+    scores["NeuralNetwork"], nn_best = run_nn_baseline(
+        Xtr2d, ytr, Xval2d, yval, Xte2d, nn_search_space, seed=SEED, n_trials=n_trials)
+    best_params_all["NeuralNetwork"] = {"best_params": nn_best}
 
     # --- Isolation Forest (unsupervised, fixed params — labels are not used).
     scores["IsolationForest"] = run_iforest_baseline(Xtr2d, Xte2d, params=iforest_params, seed=SEED)
