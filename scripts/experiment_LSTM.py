@@ -18,7 +18,8 @@ import json
 import optuna
 from sklearn.metrics import average_precision_score
 
-from src.utils.setup import load_config, resolve_dataset, suggest_param
+from src.utils.setup import (load_config, resolve_dataset, resolve_timing,
+                             resolve_sequence, run_tag, suggest_param)
 from src.data.sequence_data import (build_sequence_dataset, temporal_split,
                                      fit_scaler, apply_scaler)
 from src.methods.models import LSTMClassifier, TransformerClassifier
@@ -136,9 +137,13 @@ if __name__ == "__main__":
     dataset = resolve_dataset(data_config)
     type_dataset = data_config[dataset]["type_dataset"]
 
-    net_cfg = data_config[dataset]["network_construction"]
+    # resolve_timing/resolve_sequence apply SPARTA_* env overrides so one Slurm array task
+    # picks its (timing, K, task) combo without editing the YAML; `tag` namespaces this
+    # combo's features dir, .npz cache, and every output file so a sweep's combos coexist.
+    net_cfg = resolve_timing(data_config, dataset)
     echo = net_cfg["echo"]
-    seq_cfg = data_config[dataset]["sequence"]
+    tag = run_tag(net_cfg)
+    seq_cfg = resolve_sequence(data_config, dataset)
     K = seq_cfg["K"]
     task = seq_cfg["task"]
     n_test_anchors = seq_cfg["n_test_anchors"]
@@ -151,12 +156,17 @@ if __name__ == "__main__":
     if storage:
         storage = storage.format(dataset=type_dataset)
 
-    suffix = "_echo" if echo else ""
+    # Per-combo stem for all outputs (tag already encodes echo + snapshot grid).
+    stem = f"{type_dataset}_{tag}_K{K}_{task}"
 
     # --- Build the windowed dataset (T derived from the dataset's snapshot grid).
+    # features_dir + cache_dir are namespaced by `tag` so each timing combo reads its own
+    # snapshots and writes its own .npz (the tag encodes width/days_echo — the field the
+    # old cache key omitted — so a same-T combo can no longer hit a stale cache).
     X, mask, y, anchors, nodes = build_sequence_dataset(
         dataset, type_dataset, echo, K, task,
-        features_dir=ts_cfg.get("data_directory", "results/features"),
+        features_dir=os.path.join(ts_cfg.get("data_directory", "results/features"), tag),
+        cache_dir=os.path.join("results/timeseries", tag),
         time_step=net_cfg["time_step"], time_width=net_cfg["time_width"],
         time_type=net_cfg["time_type"])
 
@@ -197,8 +207,8 @@ if __name__ == "__main__":
     # --- Sequence models: one Optuna study per architecture, then final train + test.
     # `task` is in every study/output name so nowcast and forecast runs don't collide
     # (overwriting saved models/params or resuming an incompatible SQLite study).
-    archs = [("lstm", f"LSTM_{type_dataset}_{task}", "LSTM"),
-             ("transformer", f"Transformer_{type_dataset}_{task}", "Transformer")]
+    archs = [("lstm", f"LSTM_{stem}", "LSTM"),
+             ("transformer", f"Transformer_{stem}", "Transformer")]
     for arch, study_name, label in archs:
         best_params, best_value = _tune_arch(
             arch, study_name, storage, n_trials, search_space, n_features,
@@ -217,17 +227,17 @@ if __name__ == "__main__":
         torch.save(
             {"state_dict": model.state_dict(), "mu": mu, "sd": sd,
              "arch": arch, "best_params": best_params, "K": K, "task": task},
-            f"results/models/{study_name}{suffix}.pt")
+            f"results/models/{study_name}.pt")
 
-    # --- Persist best params, metrics, and the ROC/PR comparison figure.
-    with open(f"results/tuning/timeseries_{type_dataset}_{task}{suffix}_best_params.json", "w") as f:
-        json.dump({"dataset": type_dataset, "task": task, "K": K, "echo": echo,
+    # --- Persist best params, metrics, and the ROC/PR comparison figure (per-combo stem).
+    with open(f"results/tuning/timeseries_{stem}_best_params.json", "w") as f:
+        json.dump({"dataset": type_dataset, "run_tag": tag, "task": task, "K": K, "echo": echo,
                    "models": best_params_all}, f, indent=2)
 
-    metrics_path = f"results/experiments/{type_dataset}_timeseries_{task}{suffix}.txt"
+    metrics_path = f"results/experiments/{stem}_timeseries.txt"
     evaluation.write_metrics(metrics_path, scores, y_test)
     evaluation.plot_curves(
         scores, y_test,
-        f"Time-series ({task}) — {type_dataset} (n={len(y_test)}, {int(y_test.sum())} positive)",
-        save_path=f"results/experiments/{type_dataset}_timeseries_{task}{suffix}.png")
+        f"Time-series ({task}, {tag}) — {type_dataset} (n={len(y_test)}, {int(y_test.sum())} positive)",
+        save_path=f"results/experiments/{stem}_timeseries.png")
     print(f"Wrote metrics -> {metrics_path}")

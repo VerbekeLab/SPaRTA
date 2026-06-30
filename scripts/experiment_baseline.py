@@ -17,7 +17,8 @@ import json
 import optuna
 from sklearn.metrics import average_precision_score
 
-from src.utils.setup import load_config, resolve_dataset, suggest_param
+from src.utils.setup import (load_config, resolve_dataset, resolve_timing,
+                             resolve_sequence, run_tag, suggest_param)
 from src.data.sequence_data import build_sequence_dataset, temporal_split
 from src.methods import evaluation
 
@@ -170,9 +171,14 @@ if __name__ == "__main__":
     dataset = resolve_dataset(data_config)
     type_dataset = data_config[dataset]["type_dataset"]
 
-    net_cfg = data_config[dataset]["network_construction"]
+    # resolve_timing/resolve_sequence apply SPARTA_* env overrides so one Slurm array task
+    # picks its (timing, K, task) combo without editing the YAML; `tag` namespaces this
+    # combo's features dir, .npz cache, and outputs — and must match experiment_LSTM.py so
+    # baselines and sequence models read the SAME windows for the per-combo comparison.
+    net_cfg = resolve_timing(data_config, dataset)
     echo = net_cfg["echo"]
-    seq_cfg = data_config[dataset]["sequence"]
+    tag = run_tag(net_cfg)
+    seq_cfg = resolve_sequence(data_config, dataset)
     K = seq_cfg["K"]
     task = seq_cfg["task"]
     n_test_anchors = seq_cfg["n_test_anchors"]
@@ -184,14 +190,16 @@ if __name__ == "__main__":
     n_trials = bl_cfg["n_trials"]            # Optuna budget, shared by XGBoost and the MLP
     iforest_params = bl_cfg.get("iforest", {})
 
-    suffix = "_echo" if echo else ""
+    # Per-combo stem for all outputs (tag already encodes echo + snapshot grid).
+    stem = f"{type_dataset}_{tag}_K{K}_{task}"
 
-    # --- Build the SAME windowed dataset the sequence models use. The baselines need
-    # only the raw per-task 2D arrays (no scaling — trees and isolation splits are
-    # scale-invariant per feature).
+    # --- Build the SAME windowed dataset the sequence models use (same tag-namespaced
+    # features_dir + cache_dir as experiment_LSTM.py). The baselines need only the raw
+    # per-task 2D arrays (no scaling — trees and isolation splits are scale-invariant).
     X, mask, y, anchors, nodes = build_sequence_dataset(
         dataset, type_dataset, echo, K, task,
-        features_dir=bl_cfg.get("data_directory", "results/features"),
+        features_dir=os.path.join(bl_cfg.get("data_directory", "results/features"), tag),
+        cache_dir=os.path.join("results/timeseries", tag),
         time_step=net_cfg["time_step"], time_width=net_cfg["time_width"],
         time_type=net_cfg["time_type"])
 
@@ -237,14 +245,14 @@ if __name__ == "__main__":
     best_params_all["IsolationForest"] = {"params": iforest_params}
 
     # --- Persist best params, metrics, and the ROC/PR comparison figure.
-    with open(f"results/tuning/baselines_{type_dataset}_{task}{suffix}_best_params.json", "w") as f:
-        json.dump({"dataset": type_dataset, "task": task, "K": K, "echo": echo,
+    with open(f"results/tuning/baselines_{stem}_best_params.json", "w") as f:
+        json.dump({"dataset": type_dataset, "run_tag": tag, "task": task, "K": K, "echo": echo,
                    "models": best_params_all}, f, indent=2)
 
-    metrics_path = f"results/experiments/{type_dataset}_baselines_{task}{suffix}.txt"
+    metrics_path = f"results/experiments/{stem}_baselines.txt"
     evaluation.write_metrics(metrics_path, scores, y_test)
     evaluation.plot_curves(
         scores, y_test,
-        f"Baselines ({task}) — {type_dataset} (n={len(y_test)}, {int(y_test.sum())} positive)",
-        save_path=f"results/experiments/{type_dataset}_baselines_{task}{suffix}.png")
+        f"Baselines ({task}, {tag}) — {type_dataset} (n={len(y_test)}, {int(y_test.sum())} positive)",
+        save_path=f"results/experiments/{stem}_baselines.png")
     print(f"Wrote metrics -> {metrics_path}")

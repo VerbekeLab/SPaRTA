@@ -10,7 +10,7 @@ import pandas as pd
 from tqdm import tqdm
 from multiprocessing import Pool, cpu_count
 
-from src.utils.setup import load_config, resolve_dataset
+from src.utils.setup import load_config, resolve_dataset, resolve_dynamic, resolve_timing, run_tag
 from src.utils.graph_processing import graph_community
 
 from src.data.network_data_loader import *
@@ -93,15 +93,21 @@ if __name__ == "__main__":
 
     network = resolve_dataset(data_config)
     type_dataset = data_config[network]['type_dataset']
-    dynamic = data_config['parameters']['time_dynamic']
+    dynamic = resolve_dynamic(data_config)
 
     if dynamic:
-        time_step=data_config[network]['network_construction']['time_step']
-        time_width=data_config[network]['network_construction']['time_width']
-        time_type=data_config[network]['network_construction']['time_type']
+        # SPARTA_* env vars let one Slurm array task pick a timing combo without editing
+        # the YAML (see resolve_timing); run_tag namespaces this combo's output dir so a
+        # sweep's combos coexist in results/features/<tag>/ instead of overwriting.
+        timing = resolve_timing(data_config, network)
+        time_step = timing['time_step']
+        time_width = timing['time_width']
+        time_type = timing['time_type']
 
-        echo = data_config[network]['network_construction']['echo']
-        days_echo = data_config[network]['network_construction']['days_echo']
+        echo = timing['echo']
+        days_echo = timing['days_echo']
+
+        out_dir = os.path.join("results/features", run_tag(timing))
 
     if network in ('AMLWorld', 'AMLSim', 'Tide'):
         if dynamic:
@@ -113,17 +119,18 @@ if __name__ == "__main__":
             )
 
             networks = construct_network_time(start_dates, end_dates, dataset=network, type_dataset=type_dataset, echo=echo, days_echo=days_echo)
+            os.makedirs(out_dir, exist_ok=True)
             for i in range(len(networks)):
                 print(f"Processing dynamic network snapshot {i+1}/{len(networks)}...")
                 G, labels = networks[i]
                 df = process_graph(G)
 
                 if echo:
-                    out_path_features = f"results/features/{type_dataset}_dynamic_{i}_features_echo.csv"
-                    out_path_labels = f"results/features/{type_dataset}_dynamic_{i}_labels_echo.csv"
+                    out_path_features = os.path.join(out_dir, f"{type_dataset}_dynamic_{i}_features_echo.csv")
+                    out_path_labels = os.path.join(out_dir, f"{type_dataset}_dynamic_{i}_labels_echo.csv")
                 else:
-                    out_path_features = f"results/features/{type_dataset}_dynamic_{i}_features.csv"
-                    out_path_labels = f"results/features/{type_dataset}_dynamic_{i}_labels.csv"
+                    out_path_features = os.path.join(out_dir, f"{type_dataset}_dynamic_{i}_features.csv")
+                    out_path_labels = os.path.join(out_dir, f"{type_dataset}_dynamic_{i}_labels.csv")
 
                 df.to_csv(out_path_features, index=False)
                 print(f"Results saved to {out_path_features}")

@@ -1,102 +1,84 @@
-# Slurm job scripts for VSC
+# SPaRTA SLURM runbook — run + tune all models, with a timing sweep
 
-These scripts run the SPaRTA pipeline as **job arrays**, one array task per dataset,
-so you can launch every dataset at once instead of editing the YAML between runs.
+All jobs are Slurm array scripts for VSC (preset to `--clusters=wice --account=lp_verbekelab`;
+change those headers + the `miniconda3` path if your setup differs). They select what to run
+via `SPARTA_*` env vars (see `src/utils/setup.py`: `resolve_dataset`, `resolve_dynamic`,
+`resolve_timing`, `resolve_sequence`, `run_tag`) — **no edits to `config/*.yaml` are needed
+for the sweep**. Run from the repo root. Logs land in `slurm/logs/` (created on submit).
 
-## How the dataset is selected
+## The sweep grid (edit in ONE place: `slurm/sweep_common.sh`)
 
-The scripts export `SPARTA_DATASET` (and optionally `SPARTA_EXPERIMENT`) per array
-task. The Python entry points read these env vars via `resolve_dataset` /
-`resolve_experiment` in [src/utils/setup.py](../src/utils/setup.py) and fall back to
-`config/data/config.yaml` / `config/methods/config.yaml` when they are unset. So:
+- **Datasets:** AMLWorld, AMLSim, Tide.
+- **Timing combos (expensive — one feature re-extraction each); tag = output namespace:**
+  `d1_echo3`, `d1_echo7` (echo on, `days_echo` 3/7), `d1_w1`, `d1_w3` (echo off, window 1/3).
+  All at daily `step=1`, so the snapshot count `T` is constant per dataset and the K-windows
+  are comparable across combos.
+- **K / task (free — re-windowed from the same snapshots):** `K ∈ {2,3,5}`, `task ∈ {nowcast, forecast}`.
 
-- **Local, single run:** just run the script as before — it uses the YAML values.
-- **VSC sweep:** the array task sets the env var; no YAML edit needed.
+`bash slurm/sweep_common.sh` prints the array ranges. After editing the grid, update each
+script's `--array` range to match (the dynamic scripts source this file, so the grid itself
+stays in lockstep — only the `#SBATCH --array=` line is hand-kept).
 
-The `DATASETS` bash array near the top of each script is the sweep list. The array
-range (`--array=0-2`) must match its length (3 datasets → `0-2`).
+## What depends on what
 
-## Before you submit — edit the header placeholders
+- **Static models** (`experiment_features.py` = LogReg/XGB/NN, `experiment_CNN.py`) are
+  **timing-independent** → static features extracted once.
+- **Dynamic models** (`experiment_LSTM.py` = LSTM/Transformer, `experiment_baseline.py` =
+  XGB/MLP/IsolationForest) read `results/features/<tag>/` → one run per (dataset × tag × K × task).
 
-Every script has a block marked `# <<< EDIT >>>`. Fill in for your VSC cluster:
-
-- `--account=` your VSC credit account (e.g. `lp_...` / `intro_...`).
-- `--clusters=` and `--partition=` (e.g. wICE: `--clusters=wice --partition=gpu`;
-  Genius: `--clusters=genius --partition=gpu_p100`). Check `sinfo` / VSC docs.
-- `--gpus-per-node=` / `--gres=gpu:1` syntax — clusters differ; use what your cluster expects.
-- The `module load` lines and the conda activation path (`CONDA_SH`, `ENV_NAME`).
-
-## Submit
+## Submission order
 
 ```bash
-# from the repo root
-sbatch slurm/extract_features.slurm     # CPU: build 3x3 features for all datasets (parallel array)
-sbatch slurm/train_features.slurm       # CPU: LogReg + XGBoost + NN on the features
-sbatch slurm/train_cnn.slurm            # GPU: CNN + Optuna HPO on the 3x3 pictures
-sbatch slurm/train_baseline.slurm       # CPU: XGBoost + IsolationForest on the K-snapshot windows
-sbatch slurm/train_lstm.slurm           # GPU: LSTM + Transformer + Optuna HPO on the K-snapshot windows
+cd $VSC_DATA/SPaRTA
+
+# 1. Feature extraction (the expensive stage) — static + dynamic can run in parallel.
+EXTRACT_STATIC=$(sbatch --parsable slurm/extract_features.slurm)          # 3 tasks  (static)
+EXTRACT_DYN=$(sbatch --parsable slurm/extract_features_dynamic.slurm)     # 12 tasks (dynamic sweep)
+
+# 2. Training — each depends on its extraction finishing (afterok = only if extraction ok).
+#    Static models depend on the static extraction:
+sbatch --dependency=afterok:$EXTRACT_STATIC slurm/train_features.slurm    # 3 tasks  (CPU)
+sbatch --dependency=afterok:$EXTRACT_STATIC slurm/train_cnn.slurm         # 3 tasks  (GPU)
+#    Dynamic models depend on the dynamic extraction:
+LSTM=$(sbatch --parsable --dependency=afterok:$EXTRACT_DYN slurm/train_lstm.slurm)       # 72 (GPU)
+BASE=$(sbatch --parsable --dependency=afterok:$EXTRACT_DYN slurm/train_baseline.slurm)   # 72 (CPU)
+
+# 3. Aggregate everything into results/experiments/summary.csv (afterany: don't let an
+#    infeasible per-combo cell block the summary — it's reported as a gap instead).
+sbatch --dependency=afterany:$LSTM:$BASE slurm/collect.slurm
 ```
 
-`extract_features` must finish before the training jobs (they read
-`results/features/`). For the time-series scripts you also need
-`time_dynamic: True` (+ `echo: True`) in `config/data/config.yaml` so the
-per-snapshot dynamic CSVs get written.
+`collect.slurm` also picks up the static `train_features` / `train_cnn` outputs if they have
+finished; to force it strictly after those too, add their job ids to its `--dependency`.
+
+Tips: append `%8` to a training script's `--array` (e.g. `0-71%8`) to cap concurrent tasks if
+your GPU/CPU allocation is limited. Raise `--time=` or shrink `timeseries.n_trials` in
+`config/methods/config.yaml` if the 12 h LSTM wall time is tight.
 
 ## Limited disk: extract one dataset at a time
 
-`extract_features.slurm` uses `--array=0-2` (all three tasks run **in parallel**),
-so all three raw datasets must sit under `data/` at once. If you cannot hold them
-simultaneously, use **`extract_features_sequential.slurm`** instead:
+`extract_features_sequential.slurm` runs the **static** extraction one dataset at a time
+(`--array=0-2%1` + a symlink stage-in/out from an external `STAGE_ROOT`; `data/` stays
+read-only — only a transient symlink is created and removed). For the dynamic sweep under the
+same constraint, copy its staging block into a `%1`-throttled `extract_features_dynamic.slurm`.
+
+## Optional VGG16 track (separate — AMLWorld HI-Small only, untuned)
+
+Not part of the timing sweep: `visualising_network.py` hardcodes AMLWorld + a static graph,
+and `experiment_pictures.py` has no HPO (fixed 10 epochs).
 
 ```bash
-sbatch slurm/extract_features_sequential.slurm   # CPU: build features, one dataset at a time
+RENDER=$(sbatch --parsable slurm/render_pictures.slurm)                   # CPU, heavy
+sbatch --dependency=afterok:$RENDER slurm/train_vgg16.slurm               # GPU, 10 epochs, no HPO
 ```
 
-It differs in two ways:
+VGG16 writes only a model file (no metrics dump), so it does **not** appear in `summary.csv`.
 
-- `--array=0-2%1` — the `%1` throttle runs a single dataset task at a time, so
-  only one dataset is on disk at any moment.
-- A **symlink** stage-in/stage-out: each task links one dataset's raw files from an
-  external archive into `data/<subdir>`, extracts, then removes the link. Because
-  `data/` is read-only (no vendor files or artefacts are ever written there — only
-  a transient symlink), this respects the project's hard rule. Set `STAGE_ROOT` to
-  your archive path (datasets laid out as `AMLWorld/`, `amlsim/`, `Tide/`).
+## Outputs
 
-If you'd rather stage manually, leave `STAGE_ROOT=""`: put one dataset under
-`data/<subdir>/` yourself, `sbatch` the script (or just run
-`SPARTA_DATASET=<name> python src/methods/measure_calculation.py`), swap in the
-next dataset, repeat. Feature CSVs are namespaced by dataset
-(`results/features/HI-Small_*`, `AMLSim_*`, `HI_*`), so they never collide and the
-downstream training/analysis stays per-dataset.
-
-## Running the time-series experiment and its baselines in parallel
-
-`train_lstm.slurm` and `train_baseline.slurm` consume the **same** windowed
-dataset (`build_sequence_dataset` reads `config/data/config.yaml` -> `sequence`
-identically in both scripts). Their output filenames are disjoint
-(`*_timeseries_*` vs `*_baselines_*`), so they can safely run **at the same time**
-on different cluster resources — GPU for the sequence models, CPU for the
-baselines. Both depend only on `extract_features.slurm` having finished.
-
-```bash
-# 1) extract once (writes results/features/*_dynamic_*_features_echo.csv)
-jid=$(sbatch --parsable slurm/extract_features.slurm)
-
-# 2) fan out the two training jobs concurrently (each is itself a 3-task array
-#    over AMLWorld/AMLSim/Tide -> 6 array tasks running in parallel total).
-sbatch --dependency=afterok:$jid slurm/train_lstm.slurm
-sbatch --dependency=afterok:$jid slurm/train_baseline.slurm
-```
-
-You can submit the two `sbatch` lines in either order; Slurm schedules them
-independently, and the LSTM job sits in the GPU queue while the baseline job
-sits in the CPU queue. Each script's array (`--array=0-2`) launches its three
-dataset tasks in parallel automatically.
-
-If the LSTM array's 12 h wall time is too tight for the full population on your
-cluster, raise `--time=` in `slurm/train_lstm.slurm` or shrink the Optuna budget
-via `method_config[dataset].timeseries.n_trials`. The baselines side is
-typically much faster (small XGBoost search + IsolationForest fit), hence
-the shorter 2 h default.
-
-Logs land in `slurm/logs/` (created on submit).
+- `results/features/<tag>/{type}_dynamic_{i}_features_echo.csv` — per-combo dynamic features.
+- `results/features/{type}_static_features.csv` — static features (flat, shared).
+- `results/timeseries/<tag>/…npz` — per-combo windowed cache (the tag kills the stale-cache bug).
+- `results/experiments/{type}_{tag}_K{K}_{task}_{timeseries|baselines}.txt|.png` — per-combo metrics.
+- `results/tuning/…_best_params.json` — best HPs per combo / model.
+- `results/experiments/summary.csv` — the one tidy table for the effect-of-timing analysis.
