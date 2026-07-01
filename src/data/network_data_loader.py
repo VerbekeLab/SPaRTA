@@ -33,6 +33,9 @@ def define_ML_labels(transactions):
     # Parquet) labels only the accounts actually present, not every category;
     # a no-op for object-dtype loaders.
     accounts_labelled = transactions_labels.groupby('from_account', observed=True).mean()
+    # A node is positive if ANY of its in/out edges are laundering (fraction > 0), not a
+    # >10% share. This '> 0' rule is intentional and authoritative (see CLAUDE.md "Node
+    # labels"); don't "fix" it to > 0.1 without a paper-level reason.
     accounts_labelled['is_laundering'] = (accounts_labelled['is_laundering'] > 0) * 1
     accounts_labelled.index.name = 'Account'
     return accounts_labelled

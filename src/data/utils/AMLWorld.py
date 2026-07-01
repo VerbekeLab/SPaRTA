@@ -56,21 +56,45 @@ def load_transactions_amlworld(type_dataset='HI-Small'):
                 'Account.1': 'object',
                 'Amount Received': 'float64',
                 'Receiving Currency': 'object',
-                'Amount Paid': 'float64',
                 'Payment Currency': 'object',
                 'Payment Format': 'object',
-                'Is Laundering': 'int64'
             }
 
     transactions = pd.read_csv(
         f'./data/AMLWorld/{type_dataset}_Trans.csv',
         dtype=dtype
     )
-    transactions['Is Laundering'] = transactions['Is Laundering'].astype(bool)
+    # Coerce the label to a clean boolean. errors='coerce' turns any blank/non-numeric
+    # cell into NaN; fillna(0) treats a missing label as non-laundering. The fillna MUST
+    # precede astype(bool) — a float NaN is truthy, so casting it directly would flip a
+    # missing label to True. print (not warnings.warn) because measure_calculation.py sets
+    # warnings.simplefilter('ignore'), which would swallow a warning in the Slurm log.
+    is_laundering = pd.to_numeric(transactions['Is Laundering'], errors='coerce')
+    n_missing = int(is_laundering.isna().sum())
+    if n_missing:
+        print(f"[AMLWorld:{type_dataset}] WARNING: {n_missing} rows have a missing "
+              f"'Is Laundering' label; treating them as non-laundering (0).")
+    transactions['Is Laundering'] = is_laundering.fillna(0).astype(bool)
     transactions = transactions.rename(columns=AMLWORLD_COLUMN_MAP)
     transactions = transactions[transactions['from_account'] != transactions['to_account']]
+
+    # Coerce amount and drop rows with a missing/non-numeric value: a NaN amount would
+    # otherwise collapse into a phantom zero-weight, zero-count edge in construct_network's
+    # groupby.agg, indistinguishable from a genuine zero-amount transaction.
+    transactions['amount'] = pd.to_numeric(transactions['amount'], errors='coerce')
+    n_bad_amount = int(transactions['amount'].isna().sum())
+    if n_bad_amount:
+        print(f"[AMLWorld:{type_dataset}] WARNING: {n_bad_amount} rows have a missing/"
+              f"non-numeric 'Amount Paid'; dropping them.")
+        transactions = transactions[transactions['amount'].notna()]
+
+    # Convert to USD. Explicit guard rather than assert: an assert is stripped under
+    # python -O (letting NaN rates silently corrupt amounts), and a blank/unknown currency
+    # should name the offending value(s) instead of failing with a bare message.
     rate = transactions['Payment Currency'].map(EXCHANGE_NAME_TO_CODE).map(USD_EXCHANGE_RATES)
-    assert not rate.isna().any(), "unknown currency in AMLWorld transactions"
+    if rate.isna().any():
+        bad = sorted(transactions.loc[rate.isna(), 'Payment Currency'].dropna().unique())
+        raise ValueError(f"unmapped Payment Currency values in AMLWorld {type_dataset}: {bad}")
     transactions['amount'] = transactions['amount'] / rate
     transactions['timestamp'] = pd.to_datetime(transactions['timestamp'], format='%Y/%m/%d %H:%M')
     transactions = transactions[transactions['timestamp'] <= '2022-09-11']

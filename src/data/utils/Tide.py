@@ -75,9 +75,16 @@ def _load_transactions_tide_from_csv(type_dataset='HI'):
     # Timestamps are mostly second-resolution but a minority carry microseconds
     # (e.g. '...:15.446144'); ISO8601 parses both shapes.
     transactions['timestamp'] = pd.to_datetime(transactions['timestamp'], format='ISO8601')
-    # is_laundering reads back as object-dtype Python bools (the ownership rows
-    # leave blanks in the column); normalise to a clean boolean like AMLWorld/AMLSim.
-    transactions['is_laundering'] = transactions['is_laundering'].astype(bool)
+    # is_laundering reads back as object-dtype Python bools (the ownership rows leave
+    # blanks in the column). A bare .astype(bool) is unsafe: a float NaN is truthy, so a
+    # blank on a *transaction* row would flip to True. Coerce numerically and fill missing
+    # with 0 (fillna MUST precede astype(bool)), mirroring AMLWorld/AMLSim.
+    is_laundering = pd.to_numeric(transactions['is_laundering'], errors='coerce')
+    n_missing = int(is_laundering.isna().sum())
+    if n_missing:
+        print(f"[Tide:{type_dataset}] WARNING: {n_missing} transaction rows have a missing "
+              f"'is_fraudulent' label; treating them as non-laundering (0).")
+    transactions['is_laundering'] = is_laundering.fillna(0).astype(bool)
 
     return transactions
 
