@@ -59,13 +59,14 @@ def load_transactions_amlworld(type_dataset='HI-Small'):
                 'Amount Paid': 'float64',
                 'Payment Currency': 'object',
                 'Payment Format': 'object',
-                'Is Laundering': 'bool'
+                'Is Laundering': 'int64'
             }
 
     transactions = pd.read_csv(
         f'./data/AMLWorld/{type_dataset}_Trans.csv',
         dtype=dtype
     )
+    transactions['Is Laundering'] = transactions['Is Laundering'].astype(bool)
     transactions = transactions.rename(columns=AMLWORLD_COLUMN_MAP)
     transactions = transactions[transactions['from_account'] != transactions['to_account']]
     rate = transactions['Payment Currency'].map(EXCHANGE_NAME_TO_CODE).map(USD_EXCHANGE_RATES)
