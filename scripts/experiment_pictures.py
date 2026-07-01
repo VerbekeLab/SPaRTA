@@ -58,4 +58,5 @@ for epoch in range(num_epochs):
     print(f'Epoch [{epoch+1}/{num_epochs}], AUC-ROC: {roc_auc_score(y_true, y_pred):.4f}')
 
 # save the trained model
+os.makedirs('results/models', exist_ok=True)
 torch.save(model.state_dict(), 'results/models/cnn_visual_vgg16_experiment_pictures.pth')

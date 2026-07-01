@@ -1,6 +1,6 @@
 parameters:
-  dataset: 'AMLSim'
-  time_dynamic: True
+  dataset: 'AMLWorld' # AMLWorld | AMLSIM | Tide
+  time_dynamic: False # True | False
 
 # ---------------------------------------------------------------------------
 # Default time-series sequence settings, defined once here and shared across

@@ -87,7 +87,10 @@ def process_graph(G):
     return pd.DataFrame(results, columns=['node'] + keys_to_include)
 
 if __name__ == "__main__":
-    os.makedirs('results', exist_ok=True)
+    # Own our output directory instead of relying on the Slurm wrapper's mkdir: the
+    # static branch below writes straight into 'results/features' with no further
+    # makedirs, so it must exist here regardless of where/how this script is invoked.
+    os.makedirs('results/features', exist_ok=True)
     data_config = load_config("config/data/config.yaml")
     method_config = load_config("config/methods/config.yaml")
 
