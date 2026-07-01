@@ -28,7 +28,6 @@ set -euo pipefail
 mkdir -p slurm/logs
 
 cd $VSC_DATA/SPaRTA
-mkdir -p results/features
 
 export PATH="${VSC_DATA}/miniconda3/bin:${PATH}"
 
