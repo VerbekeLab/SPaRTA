@@ -17,7 +17,7 @@ defaults:
     K: 3                 # sliding-window length
     task: nowcast        # nowcast | forecast
     n_test_anchors: 1    # latest anchors held out for test
-    n_val_anchors: 1     # band before test, used for Optuna/early-stop
+    n_val_anchors: 3     # band before test, used for Optuna/early-stop
 
 AMLWorld:
   type_dataset: 'HI-Small'
