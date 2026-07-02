@@ -75,14 +75,22 @@ def process_graph(G):
     G_rev = G_reduced.reverse(copy=True)
 
     nodes = list(G_reduced.nodes)
-    chunksize = max(1, len(nodes) // (n_cpu * 10))
+    # Keep chunks small so imap hands results back frequently: a large chunksize
+    # makes a worker finish its whole chunk before returning anything, so tqdm
+    # only advances in big bursts (and the first update stalls until the first
+    # full chunk completes). ~200 chunks/worker gives a smooth bar; the per-result
+    # IPC cost is negligible for these lightweight tuples.
+    chunksize = max(1, len(nodes) // (n_cpu * 200))
     print(f"Number of nodes: {len(nodes)} | Using {n_cpu} processes")
     with Pool(
         processes=n_cpu,
         initializer=init_worker,
         initargs=(G_reduced, G_rev, G_und,)
     ) as pool:
-        results = list(tqdm(pool.imap(process_node, nodes, chunksize=chunksize), total=len(nodes)))
+        # imap_unordered surfaces each chunk as soon as ANY worker finishes it
+        # (ordered imap would block on chunk 0 even if later chunks are ready).
+        # Order is irrelevant here: every row embeds its own node id (see process_node).
+        results = list(tqdm(pool.imap_unordered(process_node, nodes, chunksize=chunksize), total=len(nodes)))
 
     return pd.DataFrame(results, columns=['node'] + keys_to_include)
 
