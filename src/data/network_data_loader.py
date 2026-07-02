@@ -65,9 +65,8 @@ def construct_network(dataset='AMLWorld', type_dataset=None):
     return G, labels
 
 
-def load_network_time(start_date, end_date, dataset='AMLWorld', type_dataset=None, echo=False, days_echo=3):
-    transactions = load_transactions(dataset, type_dataset=type_dataset)
-
+def _window_network(transactions, start_date, end_date, echo=False, days_echo=3):
+    """Build one snapshot (G, labels) from an already-loaded transactions frame."""
     if echo:
         start_date = end_date - pd.Timedelta(days=days_echo) # Start date is set to be the end date minus the number of days for the echo effect
         transactions_time_filtered = transactions[
@@ -108,9 +107,33 @@ def load_network_time(start_date, end_date, dataset='AMLWorld', type_dataset=Non
     return G, labels
 
 
-def construct_network_time(start_dates, end_dates, dataset='AMLWorld', type_dataset=None, echo=False, days_echo=3):
-    networks = []
+def load_network_time(start_date, end_date, dataset='AMLWorld', type_dataset=None, echo=False, days_echo=3):
+    transactions = load_transactions(dataset, type_dataset=type_dataset)
+    return _window_network(transactions, start_date, end_date, echo=echo, days_echo=days_echo)
+
+
+def construct_network_time_iter(start_dates, end_dates, dataset='AMLWorld', type_dataset=None,
+                                echo=False, days_echo=3, transactions=None):
+    """
+    Lazily yield one (G, labels) snapshot per time window.
+
+    Loads the transactions ONCE up front (or reuses a caller-provided frame via
+    ``transactions``) instead of re-reading the raw files for every window, and keeps
+    only the current snapshot's graph alive — the eager construct_network_time holds
+    every snapshot DiGraph simultaneously, which OOMs long dynamic runs (~370
+    snapshots for Tide at daily step=1).
+    """
+    if transactions is None:
+        transactions = load_transactions(dataset, type_dataset=type_dataset)
     for start_date, end_date in zip(start_dates, end_dates):
-        G, labels = load_network_time(start_date, end_date, dataset=dataset, type_dataset=type_dataset, echo=echo, days_echo=days_echo)
-        networks.append((G, labels))
-    return networks
+        # Yield without binding to a local name so the generator holds no reference
+        # to the previous snapshot's graph while the caller processes it.
+        yield _window_network(transactions, start_date, end_date, echo=echo, days_echo=days_echo)
+
+
+def construct_network_time(start_dates, end_dates, dataset='AMLWorld', type_dataset=None, echo=False, days_echo=3):
+    # Eager variant: fine for a handful of windows, but materialises ALL snapshot
+    # graphs at once — prefer construct_network_time_iter for long dynamic sweeps.
+    return list(construct_network_time_iter(
+        start_dates, end_dates, dataset=dataset, type_dataset=type_dataset, echo=echo, days_echo=days_echo
+    ))

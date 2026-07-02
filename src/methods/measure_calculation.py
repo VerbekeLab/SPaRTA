@@ -6,6 +6,7 @@ sys.path.append(DIR)
 
 import warnings; warnings.simplefilter('ignore')
 
+import gc
 import pandas as pd
 from tqdm import tqdm
 from multiprocessing import Pool, cpu_count
@@ -122,18 +123,32 @@ if __name__ == "__main__":
 
     if network in ('AMLWorld', 'AMLSim', 'Tide'):
         if dynamic:
+            # Load the transactions ONCE and share the frame between the date grid and
+            # the snapshot generator. The old eager construct_network_time re-read the
+            # raw files for every window AND kept all ~370 snapshot graphs alive at
+            # once, which got long runs OOM-killed by Slurm.
+            transactions = load_transactions(network, type_dataset=type_dataset)
             start_dates, end_dates = define_dates(
-                load_transactions(network, type_dataset=type_dataset)['timestamp'],
+                transactions['timestamp'],
                 time_step=time_step,
                 time_width=time_width,
                 time_type=time_type
             )
+            n_snapshots = len(start_dates)
 
-            networks = construct_network_time(start_dates, end_dates, dataset=network, type_dataset=type_dataset, echo=echo, days_echo=days_echo)
+            networks_iter = construct_network_time_iter(
+                start_dates, end_dates, dataset=network, type_dataset=type_dataset,
+                echo=echo, days_echo=days_echo, transactions=transactions
+            )
             os.makedirs(out_dir, exist_ok=True)
-            for i in range(len(networks)):
-                print(f"Processing dynamic network snapshot {i+1}/{len(networks)}...")
-                G, labels = networks[i]
+            # Manual counter, NOT enumerate(): CPython's enumerate (and zip) reuse
+            # their cached result tuple, which keeps a strong ref to the PREVIOUS
+            # (G, labels) until AFTER the generator has built the next snapshot —
+            # holding two graphs resident and defeating the del/gc below.
+            i = -1
+            for G, labels in networks_iter:
+                i += 1
+                print(f"Processing dynamic network snapshot {i+1}/{n_snapshots}...")
                 df = process_graph(G)
 
                 if echo:
@@ -147,6 +162,11 @@ if __name__ == "__main__":
                 print(f"Results saved to {out_path_features}")
                 labels.to_csv(out_path_labels)
                 print(f"Labels saved to {out_path_labels}")
+
+                # Free this snapshot before the generator builds the next one — the
+                # loop variables would otherwise keep the old graph alive alongside it.
+                del G, labels, df
+                gc.collect()
 
 
         else:
