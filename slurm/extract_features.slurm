@@ -1,15 +1,15 @@
 #!/bin/bash -l
-# Build the STATIC 3x3 ego-network features for every dataset (one array task each).
+# Build the STATIC 3x3 ego-network features for ONE dataset per submission:
+#   sbatch slurm/extract_features.slurm AMLWorld      # then AMLSim, Tide as separate runs
 # These feed the timing-INDEPENDENT models (experiment_features.py, experiment_CNN.py), so
-# they're extracted once — SPARTA_TIME_DYNAMIC=false forces the static branch regardless of
-# config/data/config.yaml. The DYNAMIC (snapshot) features for the timing sweep are built by
-# extract_features_dynamic.slurm.
+# they're extracted once per dataset — SPARTA_TIME_DYNAMIC=false forces the static branch
+# regardless of config/data/config.yaml. The DYNAMIC (snapshot) features for the timing
+# sweep are built by extract_features_dynamic.slurm.
 # CPU job — measure_calculation uses a multiprocessing Pool, not the GPU.
 
 #SBATCH --job-name=sparta_extract
-#SBATCH --output=slurm/logs/extract_%A_%a.out
-#SBATCH --error=slurm/logs/extract_%A_%a.err
-#SBATCH --array=0-2
+#SBATCH --output=slurm/logs/extract_%j.out
+#SBATCH --error=slurm/logs/extract_%j.err
 #SBATCH --time=16:00:00
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
@@ -31,9 +31,9 @@ export PATH="${VSC_DATA}/miniconda3/bin:${PATH}"
 
 source activate SPaRTA_env
 
-# Sweep list — keep --array range in sync with its length (3 -> 0-2).
-DATASETS=(AMLWorld AMLSim Tide)
-export SPARTA_DATASET="${DATASETS[$SLURM_ARRAY_TASK_ID]}"
+# Dataset from the submission argument (or SPARTA_DATASET via --export).
+source slurm/sweep_common.sh
+resolve_dataset_arg "${1:-}"
 export SPARTA_TIME_DYNAMIC=false      # static branch -> results/features/{type}_static_*
 echo "[$(date)] extracting STATIC features for SPARTA_DATASET=$SPARTA_DATASET"
 

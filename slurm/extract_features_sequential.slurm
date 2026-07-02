@@ -1,13 +1,16 @@
 #!/bin/bash -l
-# Build the 3x3 ego-network features ONE DATASET AT A TIME.
+# Build the STATIC 3x3 ego-network features for ONE dataset, with disk staging:
+#   sbatch slurm/extract_features_sequential.slurm AMLWorld   # then AMLSim, Tide separately
 #
 # Use this instead of extract_features.slurm when you cannot hold all three raw
-# datasets on disk simultaneously. The array throttle `%1` forces Slurm to run a
-# single task at a time. For each task the stage-in hook SYMLINKS one dataset's
-# raw files into data/<subdir> from an external archive, extracts its features,
-# then removes the symlink before the next task starts. Peak disk usage is
-# therefore ONE raw dataset (the small per-dataset feature CSVs in
-# results/features/ accumulate harmlessly).
+# datasets on disk simultaneously. The stage-in hook SYMLINKS the dataset's raw
+# files into data/<subdir> from an external archive, extracts its features, then
+# removes the symlink at the end. Peak disk usage is therefore ONE raw dataset
+# (the small per-dataset feature CSVs in results/features/ accumulate harmlessly).
+# To keep runs strictly one-after-another, chain the submissions:
+#   J1=$(sbatch --parsable slurm/extract_features_sequential.slurm AMLWorld)
+#   J2=$(sbatch --parsable --dependency=afterany:$J1 slurm/extract_features_sequential.slurm AMLSim)
+#   sbatch --dependency=afterany:$J2 slurm/extract_features_sequential.slurm Tide
 #
 # Why a symlink and not a copy: CLAUDE.md marks data/ read-only ("never write,
 # rename, or regenerate inside data/"). A symlink keeps the actual raw files in
@@ -19,11 +22,8 @@
 # CPU job — measure_calculation uses a multiprocessing Pool, not the GPU.
 
 #SBATCH --job-name=sparta_extract_seq
-#SBATCH --output=slurm/logs/extract_seq_%A_%a.out
-#SBATCH --error=slurm/logs/extract_seq_%A_%a.err
-# `%1` = at most one array task running at once (sequential). Keep 0-2 in sync
-# with the DATASETS length (3 datasets -> 0-2).
-#SBATCH --array=0-2%1
+#SBATCH --output=slurm/logs/extract_seq_%j.out
+#SBATCH --error=slurm/logs/extract_seq_%j.err
 #SBATCH --time=16:00:00
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
@@ -45,9 +45,9 @@ export PATH="${VSC_DATA}/miniconda3/bin:${PATH}"
 
 source activate SPaRTA_env
 
-# Sweep list — keep --array range in sync with its length (3 -> 0-2).
-DATASETS=(AMLWorld AMLSim Tide)
-export SPARTA_DATASET="${DATASETS[$SLURM_ARRAY_TASK_ID]}"
+# Dataset from the submission argument (or SPARTA_DATASET via --export).
+source slurm/sweep_common.sh
+resolve_dataset_arg "${1:-}"
 
 # Per-dataset on-disk subdirectory under data/ (matches the loader contract).
 declare -A DATA_SUBDIR=( [AMLWorld]=AMLWorld [AMLSim]=amlsim [Tide]=Tide )
@@ -55,7 +55,7 @@ SUBDIR="${DATA_SUBDIR[$SPARTA_DATASET]}"
 
 # <<< EDIT >>> Archive that holds your raw datasets as data/<subdir>-shaped
 # folders (e.g. $VSC_DATA/sparta_raw/{AMLWorld,amlsim,Tide}). Leave STAGE_ROOT
-# empty to disable staging entirely -- then you are responsible for having one
+# empty to disable staging entirely -- then you are responsible for having the
 # dataset present under data/<subdir>/ before submitting.
 STAGE_ROOT=""                                         # e.g. "$VSC_DATA/sparta_raw"
 

@@ -1,11 +1,11 @@
 #!/bin/bash -l
-# CNN over the 3x3 pictures with Optuna HPO, for every dataset (one array task
-# each). GPU job — experiment_CNN.py moves the model/data to cuda when available.
+# CNN over the 3x3 pictures with Optuna HPO, for ONE dataset per submission:
+#   sbatch slurm/train_cnn.slurm AMLWorld      # then AMLSim, Tide separately
+# GPU job — experiment_CNN.py moves the model/data to cuda when available.
 
 #SBATCH --job-name=sparta_cnn
-#SBATCH --output=slurm/logs/train_cnn_%A_%a.out
-#SBATCH --error=slurm/logs/train_cnn_%A_%a.err
-#SBATCH --array=0-2
+#SBATCH --output=slurm/logs/train_cnn_%j.out
+#SBATCH --error=slurm/logs/train_cnn_%j.err
 #SBATCH --time=12:00:00
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
@@ -28,8 +28,9 @@ export PATH="${VSC_DATA}/miniconda3/bin:${PATH}"
 
 source activate SPaRTA_env
 
-DATASETS=(AMLWorld AMLSim Tide)
-export SPARTA_DATASET="${DATASETS[$SLURM_ARRAY_TASK_ID]}"
+# Dataset from the submission argument (or SPARTA_DATASET via --export).
+source slurm/sweep_common.sh
+resolve_dataset_arg "${1:-}"
 echo "[$(date)] CNN+Optuna for SPARTA_DATASET=$SPARTA_DATASET on $(nvidia-smi -L 2>/dev/null | head -1)"
 
 python -u scripts/experiment_CNN.py
