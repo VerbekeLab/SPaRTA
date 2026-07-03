@@ -1,6 +1,8 @@
 import pandas as pd
 import networkx as nx
 
+from src.utils.louvain_capped import louvain_communities_capped
+
 def graph_degree_rel(G_copy, degree_cutoff=0.01):
     # Delete the hubs
     # The cut-off is defined as a relative number
@@ -58,7 +60,11 @@ def graph_community(G, resolution=10): # large resolution to have smaller commun
     else:
         G_undirected = G.copy()
 
-    community_list = nx.community.louvain_communities(G_undirected, resolution=resolution, seed=1997)
+    # Capped vendored Louvain, NOT nx.community.louvain_communities: the upstream
+    # implementation never terminates on some float-weighted (echo-decay) snapshots
+    # (e.g. AMLSim d1_echo3 snapshot 99/199). Bit-identical partition whenever
+    # upstream terminates — see src/utils/louvain_capped.py.
+    community_list = louvain_communities_capped(G_undirected, resolution=resolution, seed=1997)
 
     # Create a dictionary to map nodes to their community
     node_community = {}
