@@ -32,6 +32,16 @@ USD_EXCHANGE_RATES = {
 }
 
 
+# The Tide generator's licit traffic stops on 2025-12-31 (that day itself is partial:
+# ~5.8k transactions vs the ~20k daily norm) while laundering chains trickle on into
+# January 2026, leaving trailing days whose edges are ~100% laundering (e.g. the HI
+# 2026-01-06 3-day echo window holds 19 transactions — all 19 laundering). The temporal
+# val/test bands sit on the LATEST anchors, so without a cutoff they land on those
+# degenerate graphs. Trim the tail at load time — both HI and LI share this shape.
+# Mirrors the AMLWorld '<= 2022-09-11' cutoff.
+TIDE_TIMESTAMP_CUTOFF = pd.Timestamp('2025-12-31')
+
+
 def load_transactions_tide(type_dataset='HI'):
     """Return the canonical Tide transaction frame.
 
@@ -41,11 +51,17 @@ def load_transactions_tide(type_dataset='HI'):
     on disk and in RAM — important on the VSC cluster. Prefer it when present;
     otherwise parse the CSV with the original logic so the repo still works from
     the raw files alone. Both paths return identical values.
+
+    The degenerate tail is trimmed here (not in the CSV parser) so the Parquet
+    cache stays a faithful slim copy of the raw file and both paths are cut
+    identically.
     """
     parquet_path = f'./data/Tide/generated_edges_{type_dataset}.parquet'
     if os.path.exists(parquet_path):
-        return pd.read_parquet(parquet_path)
-    return _load_transactions_tide_from_csv(type_dataset=type_dataset)
+        transactions = pd.read_parquet(parquet_path)
+    else:
+        transactions = _load_transactions_tide_from_csv(type_dataset=type_dataset)
+    return transactions[transactions['timestamp'] < TIDE_TIMESTAMP_CUTOFF]
 
 
 def _load_transactions_tide_from_csv(type_dataset='HI'):

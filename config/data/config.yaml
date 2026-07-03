@@ -22,32 +22,67 @@ defaults:
 AMLWorld:
   type_dataset: 'HI-Small'
   n_channels: 10 # channels after aggregation
+  # HI-Small spans only 10 days (~450k tx/day, minute-resolution timestamps): a daily
+  # grid yields 9 snapshots -> 7 K=3 anchors -> 3 train anchors, far too few for the
+  # sequence models. A 6-hour grid gives 39 snapshots (48k-511k tx, >=66 laundering
+  # edges each). days_echo=1 scales the echo window to the finer grid: it sets both
+  # the window length and the decay rate, and a 3-day echo over 6-hour steps would
+  # smear each edge across ~12 consecutive snapshots.
   network_construction:
     echo: True
-    days_echo: 3
-    time_step: 1
-    time_width: 1
-    time_type: 'days'
-  sequence: *sequence
+    days_echo: 1
+    time_step: 6
+    time_width: 6
+    time_type: 'hours'
+  sequence:
+    <<: *sequence
+    # Lookback (K-1)*6h + 1d echo = 4.0 days, covering p75 of the 370 laundering
+    # attempts in HI-Small_Patterns.txt (duration p50 3.1d, p75 3.8d, p90 4.6d);
+    # leaves 27 anchors -> 23 train / 3 val / 1 test. Bands stay at the 3/1
+    # defaults — a week-wide test band would eat 42h of a 10-day dataset.
+    K: 13
 
 AMLSim:
   type_dataset: 'AMLSim'
   n_channels: 10 # channels after aggregation
+  # Timestamps are native integer day-steps, so the daily grid is the finest
+  # (and only sensible) resolution.
   network_construction:
     echo: True
     days_echo: 3
     time_step: 1
     time_width: 1
     time_type: 'days'
-  sequence: *sequence
+  sequence:
+    <<: *sequence
+    # Lookback (K-1)*1d + 3d echo = 9d, covering p75 of the true alert durations
+    # (alerts.csv: p50 7d, p75 9d, p90 10d, max 11d). Week-wide val/test bands:
+    # a single daily anchor has a median of only ~8 laundering edges — far too
+    # few positives for a stable AUC-PR estimate.
+    K: 7
+    n_test_anchors: 7
+    n_val_anchors: 7
 
 Tide:
   type_dataset: 'HI' # 'HI' (higher illicit ratio) or 'LI' (lower illicit ratio) -> reads data/Tide/generated_edges_<type>.csv
   n_channels: 10 # channels after aggregation
+  # A year-long simulation doesn't need daily anchor spacing: a 2-day step keeps
+  # full data coverage (step <= days_echo), halves extraction (363 -> 181
+  # snapshots) and halves the sequence tensors. d2 anchor dates equal the
+  # odd-indexed d1 anchors, so finished d1_echo3 snapshots can be renamed into
+  # the d2_echo3 layout (d2 index j = d1 index 2j+1) instead of recomputed.
   network_construction:
     echo: True
     days_echo: 3
-    time_step: 1
-    time_width: 1
+    time_step: 2
+    time_width: 2
     time_type: 'days'
-  sequence: *sequence
+  sequence:
+    <<: *sequence
+    # Lookback (K-1)*2d + 3d echo = 11d. No pattern IDs exist in the raw file;
+    # the per-account episode proxy says ~2-3d but underestimates ~7x when
+    # calibrated against AMLSim's known alert durations, so true chain durations
+    # are likely ~5-14d. Week-scale val/test bands for stable AUC-PR.
+    K: 5
+    n_test_anchors: 7
+    n_val_anchors: 7
