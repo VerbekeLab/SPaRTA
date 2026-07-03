@@ -16,14 +16,13 @@ from sklearn.linear_model import LogisticRegression
 
 from sklearn.metrics import roc_auc_score, average_precision_score, roc_curve, precision_recall_curve
 from src.utils.setup import load_config, resolve_dataset, resolve_experiment
+from src.utils.feature_io import load_table
 
 from src.methods.models import NeuralNetwork
 
 def data_prep_features(data_directory, dataset_type):
-    feature_directory = f'{data_directory}/{dataset_type}_static_features.csv'
-    label_directory = f'{data_directory}/{dataset_type}_static_labels.csv'
-    df_features = pd.read_csv(feature_directory)
-    df_labels = pd.read_csv(label_directory)
+    df_features = load_table(f'{data_directory}/{dataset_type}_static_features')
+    df_labels = load_table(f'{data_directory}/{dataset_type}_static_labels')
     df_labels.columns = ['node', 'label']
 
     df = pd.merge(df_features, df_labels, on='node', how='inner')

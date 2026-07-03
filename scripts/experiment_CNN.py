@@ -15,15 +15,17 @@ from sklearn.model_selection import train_test_split
 from src.data.feature_data import ImageDataset
 from src.methods.models import CNN
 from src.utils.setup import load_config, resolve_dataset, suggest_param
+from src.utils.feature_io import load_table
 
 from sklearn.metrics import roc_auc_score, average_precision_score
 
 import json
 import optuna
 
-def load_data(features_path, labels_path):
-    features_df = pd.read_csv(features_path)
-    labels_df = pd.read_csv(labels_path)
+def load_data(features_stem, labels_stem):
+    # Stems without extension: load_table prefers .parquet, falls back to legacy .csv.
+    features_df = load_table(features_stem)
+    labels_df = load_table(labels_stem)
     data = pd.merge(features_df, labels_df, left_on='node', right_on='Account')
     data.drop(columns=['node', 'Account'], inplace=True)
     return data
@@ -111,8 +113,8 @@ if __name__ == "__main__":
     SEARCH_SPACE = cnn_cfg['search_space']
     NUM_CHANNELS = num_channels
 
-    data = load_data(f"results/features/{type_dataset}_static_features.csv",
-                   f"results/features/{type_dataset}_static_labels.csv")
+    data = load_data(f"results/features/{type_dataset}_static_features",
+                   f"results/features/{type_dataset}_static_labels")
     
     X = data.drop(columns=['is_laundering'])
     y = data['is_laundering']

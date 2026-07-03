@@ -13,6 +13,7 @@ import torch
 from src.data.utils.dates import define_dates
 from src.data.network_data_loader import load_transactions
 from src.methods.measure_calculation import keys_to_include  # 90 feature columns, canonical order
+from src.utils.feature_io import find_table, load_table
 
 SEED = 1997
 N_FEATURES = len(keys_to_include)  # 90
@@ -26,22 +27,28 @@ def _snapshot_index(anchor, step, K, task):
 
 
 def _load_snapshot(i, type_dataset, suffix, features_dir):
-    """Read snapshot i's features + labels, validate 90 cols, return a node-indexed
-    DataFrame of the 90 features plus an `is_laundering` column."""
-    feat_path = os.path.join(features_dir, f"{type_dataset}_dynamic_{i}_features{suffix}.csv")
-    label_path = os.path.join(features_dir, f"{type_dataset}_dynamic_{i}_labels{suffix}.csv")
-    if not os.path.exists(feat_path):
+    """Read snapshot i's features + labels (Parquet preferred, legacy CSV fallback),
+    validate 90 cols, return a node-indexed DataFrame of the 90 features plus an
+    `is_laundering` column."""
+    feat_stem = os.path.join(features_dir, f"{type_dataset}_dynamic_{i}_features{suffix}")
+    label_stem = os.path.join(features_dir, f"{type_dataset}_dynamic_{i}_labels{suffix}")
+    feat_path = find_table(feat_stem)
+    if feat_path is None:
         raise ValueError(
-            f"Missing features file {feat_path}. Regenerate the 90-column dynamic "
-            f"features with src/methods/measure_calculation.py (time_dynamic=True)."
+            f"Missing features file {feat_stem}.parquet (or legacy .csv). Regenerate "
+            f"the 90-column dynamic features with src/methods/measure_calculation.py "
+            f"(time_dynamic=True)."
         )
-    if not os.path.exists(label_path):
+    if find_table(label_stem) is None:
         raise ValueError(
-            f"Missing labels file {label_path}. Regenerate with "
-            f"src/methods/measure_calculation.py (time_dynamic=True)."
+            f"Missing labels file {label_stem}.parquet (or legacy .csv). Regenerate "
+            f"with src/methods/measure_calculation.py (time_dynamic=True)."
         )
 
-    features = pd.read_csv(feat_path, dtype={"node": str})
+    features = load_table(feat_stem, dtype={"node": str})
+    # Parquet keeps the node column's written dtype (possibly int); normalise to
+    # str to match the CSV parse hint above and the labels' Account cast below.
+    features["node"] = features["node"].astype(str)
     missing = [c for c in keys_to_include if c not in features.columns]
     if missing:
         raise ValueError(
@@ -51,7 +58,7 @@ def _load_snapshot(i, type_dataset, suffix, features_dir):
             f"regenerate with src/methods/measure_calculation.py (time_dynamic=True)."
         )
 
-    labels = pd.read_csv(label_path)
+    labels = load_table(label_stem)
     # Labels file has exactly 2 columns: Account + the label (old files say
     # "Is Laundering", regenerated ones "is_laundering"). Positional rename handles both.
     labels = labels.rename(columns={labels.columns[0]: "Account", labels.columns[1]: "is_laundering"})
@@ -138,7 +145,9 @@ def build_sequence_dataset(dataset, type_dataset, echo, K, task,
 
     if use_cache:
         os.makedirs(cache_dir, exist_ok=True)
-        np.savez(cache_path, X=X, mask=mask, y=y, anchors=anchors, nodes=nodes)
+        # Compressed: X is mostly zeros (padding + absent nodes), so the plain
+        # savez cache was several times larger on disk for no benefit.
+        np.savez_compressed(cache_path, X=X, mask=mask, y=y, anchors=anchors, nodes=nodes)
 
     return X, mask, y, anchors, nodes
 

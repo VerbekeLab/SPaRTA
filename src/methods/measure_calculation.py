@@ -13,6 +13,7 @@ from multiprocessing import Pool, cpu_count
 
 from src.utils.setup import load_config, resolve_dataset, resolve_dynamic, resolve_timing, run_tag
 from src.utils.graph_processing import graph_community
+from src.utils.feature_io import save_table
 
 from src.data.network_data_loader import *
 from src.data.utils.dates import define_dates
@@ -151,16 +152,15 @@ if __name__ == "__main__":
                 print(f"Processing dynamic network snapshot {i+1}/{n_snapshots}...")
                 df = process_graph(G)
 
-                if echo:
-                    out_path_features = os.path.join(out_dir, f"{type_dataset}_dynamic_{i}_features_echo.csv")
-                    out_path_labels = os.path.join(out_dir, f"{type_dataset}_dynamic_{i}_labels_echo.csv")
-                else:
-                    out_path_features = os.path.join(out_dir, f"{type_dataset}_dynamic_{i}_features.csv")
-                    out_path_labels = os.path.join(out_dir, f"{type_dataset}_dynamic_{i}_labels.csv")
+                suffix = "_echo" if echo else ""
+                stem_features = os.path.join(out_dir, f"{type_dataset}_dynamic_{i}_features{suffix}")
+                stem_labels = os.path.join(out_dir, f"{type_dataset}_dynamic_{i}_labels{suffix}")
 
-                df.to_csv(out_path_features, index=False)
+                out_path_features = save_table(df, stem_features)
                 print(f"Results saved to {out_path_features}")
-                labels.to_csv(out_path_labels)
+                # reset_index() keeps the Account index as the first column, matching
+                # the (index-writing) to_csv layout the legacy label files carry.
+                out_path_labels = save_table(labels.reset_index(), stem_labels)
                 print(f"Labels saved to {out_path_labels}")
 
                 # Free this snapshot before the generator builds the next one — the
@@ -174,11 +174,9 @@ if __name__ == "__main__":
             G, labels = construct_network(dataset=network, type_dataset=type_dataset)
             df = process_graph(G)
 
-            out_path_features = f"results/features/{type_dataset}_static_features.csv"
-            df.to_csv(out_path_features, index=False)
+            out_path_features = save_table(df, f"results/features/{type_dataset}_static_features")
             print(f"Results saved to {out_path_features}")
-            out_path_labels = f"results/features/{type_dataset}_static_labels.csv"
-            labels.to_csv(out_path_labels)
+            out_path_labels = save_table(labels.reset_index(), f"results/features/{type_dataset}_static_labels")
             print(f"Labels saved to {out_path_labels}")
 
     else:

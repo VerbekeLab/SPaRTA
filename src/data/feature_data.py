@@ -6,6 +6,8 @@ import numpy as np
 import h5py
 from tqdm import tqdm
 
+from src.utils.feature_io import load_table
+
 class ImageDataset(Dataset):
     def __init__(self, X, y, n_channels=1, transform=None):
         self.X = torch.tensor(X, dtype=torch.float32).contiguous().view(-1, n_channels, 3, 3)
@@ -55,8 +57,8 @@ class NetworkImageDataset(Dataset):
         super().__init__()
         all_nodes, all_pictures = self._load_tensor_data(path_tensor)
         self.X = all_pictures
-        # Load label dataframe
-        labels_df = pd.read_csv(f'{path_labels}{dataset_type}_static_labels.csv')
+        # Load label dataframe (Parquet preferred, legacy CSV fallback)
+        labels_df = load_table(f'{path_labels}{dataset_type}_static_labels')
         labels_df.columns = ['node', 'label']
         # Reindex labels to match node order in tensors
         labels_df = labels_df.set_index('node').reindex(all_nodes).reset_index()
