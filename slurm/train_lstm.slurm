@@ -11,8 +11,9 @@
 # slurm/sweep_common.sh (run `bash slurm/sweep_common.sh` to print the range).
 # PREREQUISITE: extract_features_dynamic.slurm has finished FOR THIS DATASET — submit with
 #   sbatch --dependency=afterok:<extract_dyn_jobid> slurm/train_lstm.slurm <Dataset>
-# Some large-K cells on short datasets (AMLWorld T~9) raise in temporal_split; that fails
-# only its own array task — collect_results.py reports the gap.
+# The per-dataset grids in sweep_common.sh keep every (K, task) cell feasible (the largest
+# K still leaves 18+ train anchors on every dataset); if a future grid edit breaks that,
+# the temporal_split guard fails only its own array task — collect_results.py reports the gap.
 
 #SBATCH --job-name=sparta_lstm
 #SBATCH --output=slurm/logs/train_lstm_%A_%a.out

@@ -10,7 +10,8 @@
 #   dynamic:  {type}_{tag}_K{K}_{task}_{timeseries|baselines}.txt   (write_metrics blocks)
 #   static:   {type}_features_{LogisticRegression|XGBoost|NN}.txt   (single-model dump)
 #   CNN:      results/tuning/CNN_{type}_best_params.json            (val AUC-PR only)
-# where tag matches d<step>_(echo<days>|w<width>), e.g. d1_echo3 / d1_w1.
+# where tag matches <g><step>_(echo<days>|w<width>) with g the time_type initial
+# (d=days, h=hours, ...), e.g. d1_echo3 / d2_w3 / h6_echo1.
 import os
 import sys
 DIR = "./"
@@ -26,10 +27,11 @@ EXP_DIR = "results/experiments"
 TUNING_DIR = "results/tuning"
 OUT_PATH = os.path.join(EXP_DIR, "summary.csv")
 
-# {type}_{tag}_K{K}_{task}_{kind}.txt — tag has the fixed d<step>_(echo<d>|w<w>) shape, so
-# the non-greedy {type} can't swallow it. type may contain hyphens (HI-Small) but no '_'.
+# {type}_{tag}_K{K}_{task}_{kind}.txt — tag has the fixed <g><step>_(echo<d>|w<w>) shape
+# (g = run_tag's time_type initial: d, h, ...), so the non-greedy {type} can't swallow it.
+# type may contain hyphens (HI-Small) but no '_'.
 DYNAMIC_RE = re.compile(
-    r"^(?P<type>.+?)_(?P<tag>d\d+_(?:echo\d+|w\d+))_K(?P<K>\d+)_"
+    r"^(?P<type>.+?)_(?P<tag>[a-z]\d+_(?:echo\d+|w\d+))_K(?P<K>\d+)_"
     r"(?P<task>nowcast|forecast)_(?P<kind>timeseries|baselines)\.txt$"
 )
 STATIC_RE = re.compile(

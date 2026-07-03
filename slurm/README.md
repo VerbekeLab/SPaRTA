@@ -27,11 +27,23 @@ re-run the one that failed.
 ## The sweep grid (edit in ONE place: `slurm/sweep_common.sh`)
 
 - **Datasets:** AMLWorld, AMLSim, Tide — chosen per submission, NOT part of the arrays.
-- **Timing combos (expensive — one feature re-extraction each); tag = output namespace:**
-  `d1_echo3`, `d1_echo7` (echo on, `days_echo` 3/7), `d1_w1`, `d1_w3` (echo off, window 1/3).
-  All at daily `step=1`, so the snapshot count `T` is constant per dataset and the K-windows
-  are comparable across combos.
-- **K / task (free — re-windowed from the same snapshots):** `K ∈ {2,3,5}`, `task ∈ {nowcast, forecast}`.
+- **Per-dataset grids** — each dataset sweeps around its own defaults from
+  `config/data/config.yaml`, because the spans and laundering-pattern durations differ
+  (measured in `notebooks/pattern_durations.ipynb`). Timing combos are the expensive axis
+  (one feature re-extraction each; tag = output namespace); K/task are free (re-windowed
+  from the same snapshots):
+
+  | Dataset  | Snapshot grid | Timing combos (tags)                        | K            |
+  |----------|---------------|---------------------------------------------|--------------|
+  | AMLWorld | 6-hour step   | `h6_echo1`, `h6_echo2`, `h6_w6`, `h6_w24`   | 7, **13**, 17 |
+  | AMLSim   | daily step    | `d1_echo3`, `d1_echo7`, `d1_w1`, `d1_w3`    | 3, **7**, 9  |
+  | Tide     | 2-day step    | `d2_echo3`, `d2_echo7`, `d2_w2`, `d2_w3`    | 3, **5**, 7  |
+
+  Bold = the YAML default. `task ∈ {nowcast, forecast}` for all. Within a dataset the
+  snapshot count `T` is constant across its combos, so its K-windows stay comparable.
+  The val/test bands (`n_val/n_test_anchors`) are not swept — they come from the YAML.
+- **Axis sizes are identical across datasets** (4 timing × 3 K × 2 tasks), so one
+  `--array` range fits all three.
 
 `bash slurm/sweep_common.sh` prints the per-dataset array ranges. After editing the grid,
 update each script's `--array` range to match (the dynamic scripts source this file, so the
@@ -110,8 +122,9 @@ VGG16 writes only a model file (no metrics dump), so it does **not** appear in `
 
 ## Outputs
 
-- `results/features/<tag>/{type}_dynamic_{i}_features_echo.csv` — per-combo dynamic features.
-- `results/features/{type}_static_features.csv` — static features (flat, shared).
+- `results/features/<tag>/{type}_dynamic_{i}_features_echo.parquet` — per-combo dynamic
+  features (`_w` combos drop the `_echo` suffix; readers also accept legacy `.csv`).
+- `results/features/{type}_static_features.parquet` — static features (flat, shared).
 - `results/timeseries/<tag>/…npz` — per-combo windowed cache (the tag kills the stale-cache bug).
 - `results/experiments/{type}_{tag}_K{K}_{task}_{timeseries|baselines}.txt|.png` — per-combo metrics.
 - `results/tuning/…_best_params.json` — best HPs per combo / model.

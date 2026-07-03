@@ -4,7 +4,8 @@
 #   sbatch slurm/extract_features_dynamic.slurm AMLWorld   # then AMLSim, Tide separately
 # One array task per timing-combo. Each task writes results/features/<run_tag>/ so the
 # combos coexist (no overwrite). This is the EXPENSIVE Stage-1 axis — feature extraction
-# per snapshot, ~199 snapshots for AMLSim and ~370 for Tide at daily step=1. The cheap
+# per snapshot: 39 snapshots for AMLWorld (6-hour grid), 199 for AMLSim (daily), 181 for
+# Tide (2-day grid); the grid is per dataset, defined in slurm/sweep_common.sh. The cheap
 # K/task axis is NOT swept here (it re-windows these same files in the training jobs).
 #
 # Array range = N_TIMING-1 (4 combos -> 0-3). Keep in sync with slurm/sweep_common.sh
