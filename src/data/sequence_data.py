@@ -145,9 +145,16 @@ def build_sequence_dataset(dataset, type_dataset, echo, K, task,
 
     if use_cache:
         os.makedirs(cache_dir, exist_ok=True)
-        # Compressed: X is mostly zeros (padding + absent nodes), so the plain
-        # savez cache was several times larger on disk for no benefit.
-        np.savez_compressed(cache_path, X=X, mask=mask, y=y, anchors=anchors, nodes=nodes)
+        # Compressed: X is mostly zeros (padding + absent nodes), so the plain savez cache was
+        # several times larger on disk for no benefit. Write to a per-process temp file then
+        # os.replace() into place: the fan-out baseline tasks (one per model, e.g. XGBoost and
+        # the MLP) may rebuild the same combo concurrently, and an atomic replace guarantees a
+        # reader sees either no file or a complete one — never a half-written .npz. Passing a
+        # file object stops np.savez_compressed from appending its own ".npz" to the temp name.
+        tmp_path = f"{cache_path}.{os.getpid()}.tmp"
+        with open(tmp_path, "wb") as fh:
+            np.savez_compressed(fh, X=X, mask=mask, y=y, anchors=anchors, nodes=nodes)
+        os.replace(tmp_path, cache_path)
 
     return X, mask, y, anchors, nodes
 

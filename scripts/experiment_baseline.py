@@ -190,8 +190,40 @@ if __name__ == "__main__":
     n_trials = bl_cfg["n_trials"]            # Optuna budget, shared by XGBoost and the MLP
     iforest_params = bl_cfg.get("iforest", {})
 
-    # Per-combo stem for all outputs (tag already encodes echo + snapshot grid).
+    # Which baselines to run this job. SPARTA_BASELINE_MODELS (comma-separated) lets a sweep
+    # fan the three models out into SEPARATE Slurm tasks so their tuning runs concurrently
+    # (wall-clock ~= the slowest single model, not XGBoost+MLP summed under one time budget)
+    # rather than all in one run. Unset / "all" -> all three, i.e. the original single-job
+    # behaviour with the original unsuffixed output names. Accepts friendly aliases.
+    ALL_MODELS = ["XGBoost", "NeuralNetwork", "IsolationForest"]
+    _MODEL_ALIASES = {
+        "xgboost": "XGBoost", "xgb": "XGBoost",
+        "neuralnetwork": "NeuralNetwork", "nn": "NeuralNetwork", "mlp": "NeuralNetwork",
+        "isolationforest": "IsolationForest", "iforest": "IsolationForest", "if": "IsolationForest",
+    }
+    raw_sel = os.environ.get("SPARTA_BASELINE_MODELS", "all").strip().lower()
+    if raw_sel in ("", "all"):
+        selected = list(ALL_MODELS)
+    else:
+        chosen = set()
+        for tok in raw_sel.split(","):
+            tok = tok.strip()
+            if not tok:
+                continue
+            if tok not in _MODEL_ALIASES:
+                raise SystemExit(
+                    f"Unknown baseline model {tok!r} in SPARTA_BASELINE_MODELS; "
+                    f"known aliases: {sorted(_MODEL_ALIASES)}")
+            chosen.add(_MODEL_ALIASES[tok])
+        # Keep canonical order regardless of how the user listed them.
+        selected = [m for m in ALL_MODELS if m in chosen]
+
+    # Per-combo stem for all outputs (tag already encodes echo + snapshot grid). When a strict
+    # subset of models runs (fan-out mode), suffix the outputs by the selected models so the
+    # concurrent per-model tasks never overwrite each other; collect_results.py parses both the
+    # combined (all-models) dump and these suffixed per-model dumps.
     stem = f"{type_dataset}_{tag}_K{K}_{task}"
+    model_suffix = "" if selected == ALL_MODELS else "_" + "-".join(selected)
 
     # --- Build the SAME windowed dataset the sequence models use (same tag-namespaced
     # features_dir + cache_dir as experiment_LSTM.py). The baselines need only the raw
@@ -220,7 +252,7 @@ if __name__ == "__main__":
     Xtr2d = _xgb_arrays(X[train_idx], K, task)
     Xval2d = _xgb_arrays(X[val_idx], K, task)
     Xte2d = _xgb_arrays(X[test_idx], K, task)
-    print(f"Baselines | task={task} K={K} echo={echo} | "
+    print(f"Baselines {selected} | task={task} K={K} echo={echo} | "
           f"train {len(train_idx)} val {len(val_idx)} test {len(test_idx)} "
           f"| 2D feature dim = {Xtr2d.shape[1]}")
 
@@ -231,28 +263,32 @@ if __name__ == "__main__":
     best_params_all = {}
 
     # --- XGBoost (supervised, tuned on the val band).
-    scores["XGBoost"], xgb_best = run_xgb_baseline(
-        Xtr2d, ytr, Xval2d, yval, Xte2d, xgb_search_space, seed=SEED, n_trials=n_trials)
-    best_params_all["XGBoost"] = {"best_params": xgb_best}
+    if "XGBoost" in selected:
+        scores["XGBoost"], xgb_best = run_xgb_baseline(
+            Xtr2d, ytr, Xval2d, yval, Xte2d, xgb_search_space, seed=SEED, n_trials=n_trials)
+        best_params_all["XGBoost"] = {"best_params": xgb_best}
 
     # --- Feed-forward MLP (supervised, tuned on the val band; standardised inputs).
-    scores["NeuralNetwork"], nn_best = run_nn_baseline(
-        Xtr2d, ytr, Xval2d, yval, Xte2d, nn_search_space, seed=SEED, n_trials=n_trials)
-    best_params_all["NeuralNetwork"] = {"best_params": nn_best}
+    if "NeuralNetwork" in selected:
+        scores["NeuralNetwork"], nn_best = run_nn_baseline(
+            Xtr2d, ytr, Xval2d, yval, Xte2d, nn_search_space, seed=SEED, n_trials=n_trials)
+        best_params_all["NeuralNetwork"] = {"best_params": nn_best}
 
     # --- Isolation Forest (unsupervised, fixed params — labels are not used).
-    scores["IsolationForest"] = run_iforest_baseline(Xtr2d, Xte2d, params=iforest_params, seed=SEED)
-    best_params_all["IsolationForest"] = {"params": iforest_params}
+    if "IsolationForest" in selected:
+        scores["IsolationForest"] = run_iforest_baseline(Xtr2d, Xte2d, params=iforest_params, seed=SEED)
+        best_params_all["IsolationForest"] = {"params": iforest_params}
 
-    # --- Persist best params, metrics, and the ROC/PR comparison figure.
-    with open(f"results/tuning/baselines_{stem}_best_params.json", "w") as f:
+    # --- Persist best params, metrics, and the ROC/PR comparison figure. model_suffix is ""
+    # for an all-models run (original filenames) and "_<models>" for a per-model fan-out task.
+    with open(f"results/tuning/baselines_{stem}{model_suffix}_best_params.json", "w") as f:
         json.dump({"dataset": type_dataset, "run_tag": tag, "task": task, "K": K, "echo": echo,
                    "models": best_params_all}, f, indent=2)
 
-    metrics_path = f"results/experiments/{stem}_baselines.txt"
+    metrics_path = f"results/experiments/{stem}_baselines{model_suffix}.txt"
     evaluation.write_metrics(metrics_path, scores, y_test)
     evaluation.plot_curves(
         scores, y_test,
         f"Baselines ({task}, {tag}) — {type_dataset} (n={len(y_test)}, {int(y_test.sum())} positive)",
-        save_path=f"results/experiments/{stem}_baselines.png")
+        save_path=f"results/experiments/{stem}_baselines{model_suffix}.png")
     print(f"Wrote metrics -> {metrics_path}")

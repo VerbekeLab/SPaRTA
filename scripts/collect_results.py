@@ -27,12 +27,16 @@ EXP_DIR = "results/experiments"
 TUNING_DIR = "results/tuning"
 OUT_PATH = os.path.join(EXP_DIR, "summary.csv")
 
-# {type}_{tag}_K{K}_{task}_{kind}.txt — tag has the fixed <g><step>_(echo<d>|w<w>) shape
-# (g = run_tag's time_type initial: d, h, ...), so the non-greedy {type} can't swallow it.
-# type may contain hyphens (HI-Small) but no '_'.
+# {type}_{tag}_K{K}_{task}_{kind}[_<models>].txt — tag has the fixed <g><step>_(echo<d>|w<w>)
+# shape (g = run_tag's time_type initial: d, h, ...), so the non-greedy {type} can't swallow it.
+# type may contain hyphens (HI-Small) but no '_'. The optional trailing _<models> group is the
+# baseline fan-out suffix (experiment_baseline.py with SPARTA_BASELINE_MODELS): per-model tasks
+# write e.g. ..._baselines_XGBoost.txt / ..._baselines_NeuralNetwork-IsolationForest.txt. It is
+# purely for filename uniqueness; the actual model names come from the 'Model:' blocks inside.
 DYNAMIC_RE = re.compile(
     r"^(?P<type>.+?)_(?P<tag>[a-z]\d+_(?:echo\d+|w\d+))_K(?P<K>\d+)_"
-    r"(?P<task>nowcast|forecast)_(?P<kind>timeseries|baselines)\.txt$"
+    r"(?P<task>nowcast|forecast)_(?P<kind>timeseries|baselines)"
+    r"(?:_(?P<models>[A-Za-z][A-Za-z-]*))?\.txt$"
 )
 STATIC_RE = re.compile(
     r"^(?P<type>.+)_features_(?P<model>LogisticRegression|XGBoost|NN)\.txt$"
@@ -111,6 +115,11 @@ def collect():
 
     df = pd.DataFrame(rows, columns=["dataset", "run_tag", "K", "task", "model",
                                      "split", "AUC_PR", "AUC_ROC"])
+    # A per-model baseline fan-out and a combined all-models run of the same combo produce the
+    # same (dataset, run_tag, K, task, model) metrics in two files; keep one so it isn't counted
+    # twice. keep="last" is arbitrary — they are identical (same seed, same code).
+    df = df.drop_duplicates(subset=["dataset", "run_tag", "K", "task", "model", "split"],
+                            keep="last")
     df = df.sort_values(["dataset", "run_tag", "task", "K", "model"],
                         na_position="first").reset_index(drop=True)
     return df, unparsed
