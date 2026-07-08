@@ -45,16 +45,19 @@ defaults:
   # resume / run in parallel; the study name is derived per dataset in-script.
   features_CNN: &features_CNN
     data_directory: 'results/features/'
-    n_trials: 100
+    n_trials: 150
     batch_size: 512
-    # Optuna study storage. Leave null (default) for an in-memory study: no
-    # files, no extra dependencies, results still written to results/tuning/.
-    # To make studies resumable / shareable across parallel array tasks, set a
-    # SQLite URL (sqlite3 ships with Python, nothing to install), e.g.:
-    #   storage: 'sqlite:///results/tuning/optuna_{dataset}.db'
-    # `{dataset}` is filled with the dataset type in-script -> one DB file per
-    # dataset, so concurrent array tasks don't contend on a single SQLite file.
-    storage: null
+    # Optuna study storage. A per-STUDY SQLite file (templated on {study_name} in-script)
+    # makes each study resumable after a Slurm timeout and lets parallel array tasks run
+    # without contending on one DB file (sqlite3 ships with Python, nothing to install). Set
+    # to null for an in-memory study (no files, but a killed job loses all its trials). To
+    # start a study over rather than resume it, delete its results/tuning/<study_name>.db.
+    storage: 'sqlite:///results/tuning/{study_name}.db'
+    # MedianPruner: objective() reports val AUC-PR each epoch, so trials tracking below the
+    # median of completed trials are stopped early — most of the budget goes to good configs.
+    pruner:
+      n_startup_trials: 10   # no pruning until this many trials finish (establish a baseline)
+      n_warmup_steps: 10     # never prune before this many epochs (early epochs are noisy)
     search_space:
       num_epochs:       {low: 10, high: 500, step: 10}
       hidden_channels:  {low: 8, high: 64, step: 2}
@@ -64,6 +67,7 @@ defaults:
       half_final_layer: [true, false]
       scale_labels:     {low: 0, high: 100000, step: 100}
       learning_rate:    [0.00001, 0.0001, 0.001, 0.01]
+      weight_decay:     {low: 1.0e-6, high: 1.0e-3, type: float, log: true}
 
   # Sequence models (LSTM / Transformer) over K-snapshot windows, tuned with
   # Optuna against the temporal val-band AUC-PR. `search_space` is consumed by
@@ -74,20 +78,26 @@ defaults:
   # persists the study to SQLite (see features_CNN) so array tasks can resume.
   timeseries: &timeseries
     data_directory: 'results/features/'
-    n_trials: 30             # Optuna budget per sequence-model architecture (LSTM, Transformer)
-    storage: null            # set sqlite:///results/tuning/optuna_{dataset}.db to resume/share
+    n_trials: 150            # Optuna budget per sequence-model architecture (LSTM, Transformer)
+    # Per-study SQLite (templated on {study_name} in-script) -> resume-after-timeout + no
+    # cross-task DB contention; null = in-memory. Delete the .db to restart a study fresh.
+    storage: 'sqlite:///results/tuning/{study_name}.db'
+    pruner:                  # MedianPruner: train_model reports val AUC-PR each epoch (see below)
+      n_startup_trials: 10
+      n_warmup_steps: 10
     search_space:
-      hidden:      {low: 16, high: 128, step: 16}
-      num_layers:  {low: 1, high: 3}
-      head_dim:    {low: 4, high: 16, step: 4}
-      nhead:       {low: 1, high: 8}          # d_model = head_dim * nhead (always divisible by nhead)
-      dropout:     {low: 0.0, high: 0.5, step: 0.1, type: float}
-      lr:          [0.0001, 0.001, 0.01]
-      batch_size:  [16, 32, 64]
-      epochs:      {low: 50, high: 300, step: 50}
-      loss:        ['bce', 'focal']
-      alpha:       {low: 0.5, high: 0.95, step: 0.05, type: float}   # focal only
-      gamma:       [0.0, 1.0, 2.0]                                   # focal only
+      hidden:       {low: 16, high: 256, step: 16}
+      num_layers:   {low: 1, high: 4}
+      head_dim:     {low: 4, high: 16, step: 4}
+      nhead:        {low: 1, high: 8}          # d_model = head_dim * nhead (always divisible by nhead)
+      dropout:      {low: 0.0, high: 0.5, step: 0.1, type: float}
+      lr:           [0.0001, 0.001, 0.01]
+      weight_decay: {low: 1.0e-6, high: 1.0e-3, type: float, log: true}
+      batch_size:   [16, 32, 64]
+      epochs:       {low: 50, high: 300, step: 50}
+      loss:         ['bce', 'focal']
+      alpha:        {low: 0.5, high: 0.95, step: 0.05, type: float}   # focal only
+      gamma:        [0.0, 1.0, 2.0]                                   # focal only
 
   # Non-sequential baselines (scripts/experiment_baseline.py) — XGBoost, a feed-forward MLP,
   # and IsolationForest on the same K-snapshot windows the sequence models use. XGBoost and
@@ -99,18 +109,33 @@ defaults:
   # (list -> categorical, {low, high, step?} -> suggest_int).
   baselines: &baselines
     data_directory: 'results/features/'
-    n_trials: 20             # Optuna budget, shared by XGBoost and the MLP (IsolationForest is not searched)
+    n_trials: 150            # Optuna budget, shared by XGBoost and the MLP (IsolationForest is not searched)
+    # Per-study SQLite (templated on {study_name} in-script): the XGBoost and MLP studies get
+    # separate DB files, so the per-model Slurm fan-out (train_baseline.slurm <ds> xgboost|nn)
+    # never contends, and each resumes after a timeout. null = in-memory. Delete .db to restart.
+    storage: 'sqlite:///results/tuning/{study_name}.db'
+    pruner:                  # MedianPruner applies to the MLP (epoch-wise val AUC-PR reports).
+      n_startup_trials: 10   # XGBoost instead uses native early stopping (xgb_early_stopping_rounds).
+      n_warmup_steps: 10
+    xgb_early_stopping_rounds: 30   # stop adding trees when val AUC-PR stalls; n_estimators is the cap
     xgb_search_space:
-      max_depth:    {low: 3, high: 8}
-      eta:          [0.01, 0.05, 0.1, 0.2]
-      subsample:    {low: 0.6, high: 1.0, step: 0.2, type: float}
-      n_estimators: {low: 100, high: 400, step: 100}
+      max_depth:        {low: 3, high: 10}
+      eta:              {low: 0.005, high: 0.3, type: float, log: true}
+      subsample:        {low: 0.6, high: 1.0, step: 0.2, type: float}
+      colsample_bytree: {low: 0.6, high: 1.0, step: 0.2, type: float}
+      min_child_weight: {low: 1, high: 10}
+      gamma:            {low: 0.0, high: 5.0, step: 0.5, type: float}
+      reg_lambda:       {low: 1.0e-3, high: 10.0, type: float, log: true}
+      reg_alpha:        {low: 1.0e-3, high: 10.0, type: float, log: true}
+      n_estimators:     {low: 200, high: 800, step: 100}   # upper bound; early stopping trims it
     nn_search_space:
-      hidden_size: {low: 16, high: 64, step: 16}
-      num_layers:  {low: 2, high: 4}
-      lr:          [0.0001, 0.001, 0.01]
-      batch_size:  [32, 64, 128]
-      epochs:      {low: 50, high: 200, step: 50}   # max_epochs cap; early stopping usually ends sooner
+      hidden_size:  {low: 16, high: 128, step: 16}
+      num_layers:   {low: 2, high: 5}
+      dropout:      {low: 0.0, high: 0.5, step: 0.1, type: float}
+      lr:           [0.0001, 0.001, 0.01]
+      weight_decay: {low: 1.0e-6, high: 1.0e-3, type: float, log: true}
+      batch_size:   [32, 64, 128]
+      epochs:       {low: 50, high: 300, step: 50}   # max_epochs cap; early stopping usually ends sooner
     iforest:
       n_estimators: 200
       max_samples: 'auto'

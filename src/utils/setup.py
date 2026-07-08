@@ -138,3 +138,51 @@ def suggest_param(trial, name: str, spec: Any):
                                        step=spec.get('step'), log=spec.get('log', False))
         return trial.suggest_int(name, low, high, step=spec.get('step', 1))
     return spec
+
+
+# --- Optuna study helpers (shared by experiment_baseline / _LSTM / _CNN) -----------------
+# optuna is imported lazily inside each helper so importing this module stays cheap and does
+# not perturb the xgboost-before-torch import order the experiment scripts rely on.
+
+def resolve_storage(cfg, **fields):
+    """Optuna storage URL from ``cfg['storage']`` with ``{field}`` placeholders filled, or
+    ``None`` when the key is unset/empty (an in-memory study, the old default).
+
+    Pass ``study_name=...`` and template the URL on it so EACH study gets its OWN SQLite
+    file: concurrent Slurm array tasks (and the per-model baseline fan-out) then never contend
+    on one file, and every study resumes independently after a wall-time kill. Example config:
+    ``storage: 'sqlite:///results/tuning/{study_name}.db'``.
+    """
+    storage = cfg.get('storage')
+    return storage.format(**fields) if storage else None
+
+
+def make_pruner(cfg):
+    """Build an Optuna pruner from ``cfg['pruner']`` (a dict of ``MedianPruner`` kwargs, e.g.
+    ``{n_startup_trials: 10, n_warmup_steps: 10}``), or a ``NopPruner`` when the key is absent
+    or falsy. Only trials that call ``trial.report()`` each epoch can be pruned, so studies
+    without intermediate reports (e.g. the single-fit XGBoost baseline) are unaffected either
+    way; the explicit NopPruner just makes "no pruning" the visible, intended default there.
+    """
+    import optuna
+    spec = cfg.get('pruner')
+    if not spec:
+        return optuna.pruners.NopPruner()
+    return optuna.pruners.MedianPruner(**spec)
+
+
+def remaining_trials(study, n_trials):
+    """Trials still to run for a budget of ``n_trials``, subtracting the finished
+    (COMPLETE / PRUNED / FAIL) trials already in ``study``.
+
+    So a study reopened from persistent ``storage`` after a Slurm timeout TOPS UP to
+    ``n_trials`` instead of running a fresh ``n_trials`` on top of what it already did. FAIL is
+    counted (not retried) so a deterministically failing trial can't loop forever; a stale
+    RUNNING trial from a killed worker is not counted, so its budget slot is refilled.
+    """
+    import optuna
+    finished = (optuna.trial.TrialState.COMPLETE,
+                optuna.trial.TrialState.PRUNED,
+                optuna.trial.TrialState.FAIL)
+    done = sum(1 for t in study.trials if t.state in finished)
+    return max(0, n_trials - done)

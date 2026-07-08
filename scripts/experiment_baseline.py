@@ -18,42 +18,56 @@ import optuna
 from sklearn.metrics import average_precision_score
 
 from src.utils.setup import (load_config, resolve_dataset, resolve_timing,
-                             resolve_sequence, run_tag, suggest_param)
+                             resolve_sequence, run_tag, suggest_param,
+                             resolve_storage, make_pruner, remaining_trials)
 from src.data.sequence_data import build_sequence_dataset, temporal_split
 from src.methods import evaluation
 
 SEED = 1997
 
 
-def run_xgb_baseline(Xtr2d, ytr, Xval2d, yval, Xte2d, search_space, seed=SEED, n_trials=20):
-    """XGBoost on already-2D feature arrays. Minimal Optuna tuning of AUC-PR on the
-    (Xval2d, yval) band only (no CV shuffle). Returns (probs_te, best_params).
-    Imbalance via scale_pos_weight (mirrors the bce pos_weight in the sequence models)."""
+def run_xgb_baseline(Xtr2d, ytr, Xval2d, yval, Xte2d, search_space, seed=SEED, n_trials=20,
+                     study_name=None, storage=None, early_stopping_rounds=None):
+    """XGBoost on already-2D feature arrays. Optuna tuning of AUC-PR on the (Xval2d, yval)
+    band only (no CV shuffle). Returns (probs_te, best_params). Imbalance via scale_pos_weight
+    (mirrors the bce pos_weight in the sequence models).
+
+    early_stopping_rounds (native XGBoost, on the val band) bounds each trial's tree count, so
+    the tuned n_estimators is an UPPER cap and predict_proba uses the best iteration. XGBoost
+    trials are single fits with no per-epoch report, so the study runs with a NopPruner (no
+    Optuna pruning); a per-study SQLite `storage` makes it resumable after a Slurm timeout."""
     from xgboost import XGBClassifier
 
     spw = (ytr == 0).sum() / max(1, (ytr == 1).sum())
 
+    def _fit(**params):
+        # eval_metric + early_stopping_rounds live on the constructor in xgboost >= 2.0; the
+        # eval_set drives both early stopping and the val-band score used by the objective.
+        kw = dict(eval_metric="aucpr", scale_pos_weight=spw, random_state=seed, **params)
+        if early_stopping_rounds:
+            kw["early_stopping_rounds"] = early_stopping_rounds
+        clf = XGBClassifier(**kw)
+        clf.fit(Xtr2d, ytr, eval_set=[(Xval2d, yval)], verbose=False)
+        return clf
+
     def objective(trial):
         params = {name: suggest_param(trial, name, spec) for name, spec in search_space.items()}
-        clf = XGBClassifier(eval_metric="aucpr", scale_pos_weight=spw,
-                            random_state=seed, **params)
-        clf.fit(Xtr2d, ytr)
+        clf = _fit(**params)
         pv = clf.predict_proba(Xval2d)[:, 1]
         return average_precision_score(yval, pv) if yval.sum() else 0.0
 
     sampler = optuna.samplers.TPESampler(seed=seed)
-    study = optuna.create_study(direction="maximize", sampler=sampler)
-    study.optimize(objective, n_trials=n_trials)
+    study = optuna.create_study(direction="maximize", sampler=sampler, study_name=study_name,
+                                storage=storage, load_if_exists=True,
+                                pruner=optuna.pruners.NopPruner())
+    study.optimize(objective, n_trials=remaining_trials(study, n_trials))
     best_params = study.best_params
 
-    clf = XGBClassifier(eval_metric="aucpr", scale_pos_weight=spw,
-                        random_state=seed, **best_params)
-    clf.fit(Xtr2d, ytr)
-    return clf.predict_proba(Xte2d)[:, 1], best_params
+    return _fit(**best_params).predict_proba(Xte2d)[:, 1], best_params
 
 
 def run_nn_baseline(Xtr2d, ytr, Xval2d, yval, Xte2d, search_space, seed=SEED,
-                    n_trials=20, patience=20):
+                    n_trials=20, patience=20, study_name=None, storage=None, pruner=None):
     """Feed-forward MLP on the already-2D feature arrays. Light Optuna tuning of AUC-PR on
     the (Xval2d, yval) band only — mirrors run_xgb_baseline. Two deliberate deviations from
     the tree baselines: (1) features are standardised (StandardScaler fit on TRAIN only),
@@ -86,20 +100,25 @@ def run_nn_baseline(Xtr2d, ytr, Xval2d, yval, Xte2d, search_space, seed=SEED,
     spw = (ytr_np == 0).sum() / max(1, (ytr_np == 1).sum())
     pos_weight = torch.tensor([spw], dtype=torch.float32, device=device)
 
-    def _fit_predict(params, X_eval):
+    def _fit_predict(params, X_eval, trial=None):
         """Train an MLP (mini-batch Adam, early-stop on val-band AUC-PR, restore the best
         state) and return (best_val_aucpr, P(positive) for X_eval). Seeded per call so
-        trials differ only by hyperparameters, not by weight init / batch order."""
+        trials differ only by hyperparameters, not by weight init / batch order. dropout and
+        weight_decay are tuned (default to the old fixed 0.0 / 1e-5 when absent). When `trial`
+        is given (tuning), the best-so-far val AUC-PR is reported each epoch and the trial is
+        pruned if it falls below the running median of completed trials."""
         torch.manual_seed(seed)
         model = NeuralNetwork(num_layers=params["num_layers"], input_size=input_size,
-                              hidden_size=params["hidden_size"], output_size=1).to(device)
+                              hidden_size=params["hidden_size"], output_size=1,
+                              dropout=params.get("dropout", 0.0)).to(device)
         criterion = nn.BCEWithLogitsLoss(pos_weight=pos_weight)
-        opt = torch.optim.Adam(model.parameters(), lr=params["lr"], weight_decay=1e-5)
+        opt = torch.optim.Adam(model.parameters(), lr=params["lr"],
+                               weight_decay=params.get("weight_decay", 1e-5))
         loader = DataLoader(TensorDataset(Xtr, ytr_t), batch_size=params["batch_size"],
                             shuffle=True, generator=torch.Generator().manual_seed(seed))
 
         best_ap, best_state, wait = -1.0, None, 0
-        for _ in range(params["epochs"]):    # 'epochs' is the max_epochs cap; patience usually ends sooner
+        for epoch in range(params["epochs"]):    # 'epochs' is the max_epochs cap; patience/pruning end sooner
             model.train()
             for xb, yb in loader:
                 opt.zero_grad()
@@ -114,8 +133,15 @@ def run_nn_baseline(Xtr2d, ytr, Xval2d, yval, Xte2d, search_space, seed=SEED,
                 best_state = {k: v.detach().clone() for k, v in model.state_dict().items()}
             else:
                 wait += 1
-                if wait >= patience:
-                    break
+            # Report best-so-far (monotone) so the pruner compares each trial's best at matching
+            # epochs; a dip in a single noisy epoch can't prune a trial that already found a good
+            # config. Report before the early-stop break so the last value is always recorded.
+            if trial is not None:
+                trial.report(best_ap, epoch)
+                if trial.should_prune():
+                    raise optuna.TrialPruned()
+            if wait >= patience:
+                break
         if best_state is not None:
             model.load_state_dict(best_state)
         model.eval()
@@ -125,12 +151,14 @@ def run_nn_baseline(Xtr2d, ytr, Xval2d, yval, Xte2d, search_space, seed=SEED,
 
     def objective(trial):
         params = {name: suggest_param(trial, name, spec) for name, spec in search_space.items()}
-        best_ap, _ = _fit_predict(params, Xval)
+        best_ap, _ = _fit_predict(params, Xval, trial=trial)
         return best_ap
 
     sampler = optuna.samplers.TPESampler(seed=seed)
-    study = optuna.create_study(direction="maximize", sampler=sampler)
-    study.optimize(objective, n_trials=n_trials)
+    study = optuna.create_study(direction="maximize", sampler=sampler, study_name=study_name,
+                                storage=storage, load_if_exists=True,
+                                pruner=(pruner or optuna.pruners.NopPruner()))
+    study.optimize(objective, n_trials=remaining_trials(study, n_trials))
     best_params = study.best_params
 
     # Refit the best config on train (early-stopped on val, as in run_xgb_baseline) and score test.
@@ -189,6 +217,8 @@ if __name__ == "__main__":
     nn_search_space = bl_cfg["nn_search_space"]
     n_trials = bl_cfg["n_trials"]            # Optuna budget, shared by XGBoost and the MLP
     iforest_params = bl_cfg.get("iforest", {})
+    # Resumable per-study SQLite storage + MedianPruner (MLP) + XGBoost native early stopping.
+    xgb_esr = bl_cfg.get("xgb_early_stopping_rounds")
 
     # Which baselines to run this job. SPARTA_BASELINE_MODELS (comma-separated) lets a sweep
     # fan the three models out into SEPARATE Slurm tasks so their tuning runs concurrently
@@ -262,16 +292,22 @@ if __name__ == "__main__":
     scores = {}
     best_params_all = {}
 
-    # --- XGBoost (supervised, tuned on the val band).
+    # --- XGBoost (supervised, tuned on the val band; native early stopping, resumable study).
     if "XGBoost" in selected:
+        xgb_study = f"baseline_xgb_{stem}"
         scores["XGBoost"], xgb_best = run_xgb_baseline(
-            Xtr2d, ytr, Xval2d, yval, Xte2d, xgb_search_space, seed=SEED, n_trials=n_trials)
+            Xtr2d, ytr, Xval2d, yval, Xte2d, xgb_search_space, seed=SEED, n_trials=n_trials,
+            study_name=xgb_study, storage=resolve_storage(bl_cfg, study_name=xgb_study),
+            early_stopping_rounds=xgb_esr)
         best_params_all["XGBoost"] = {"best_params": xgb_best}
 
-    # --- Feed-forward MLP (supervised, tuned on the val band; standardised inputs).
+    # --- Feed-forward MLP (supervised, tuned on the val band; standardised inputs; pruned + resumable).
     if "NeuralNetwork" in selected:
+        nn_study = f"baseline_nn_{stem}"
         scores["NeuralNetwork"], nn_best = run_nn_baseline(
-            Xtr2d, ytr, Xval2d, yval, Xte2d, nn_search_space, seed=SEED, n_trials=n_trials)
+            Xtr2d, ytr, Xval2d, yval, Xte2d, nn_search_space, seed=SEED, n_trials=n_trials,
+            study_name=nn_study, storage=resolve_storage(bl_cfg, study_name=nn_study),
+            pruner=make_pruner(bl_cfg))
         best_params_all["NeuralNetwork"] = {"best_params": nn_best}
 
     # --- Isolation Forest (unsupervised, fixed params — labels are not used).

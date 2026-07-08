@@ -6,25 +6,35 @@ import torch.nn.functional as F
 
 class NeuralNetwork(nn.Module):
     def __init__(
-            self, 
+            self,
             num_layers: int,
-            input_size: int, 
-            hidden_size: int, 
-            output_size: int
+            input_size: int,
+            hidden_size: int,
+            output_size: int,
+            dropout: float = 0.0
             ):
         super().__init__()
+        # dropout defaults to 0.0 so the static-features path (experiment_features.py), which
+        # does not pass it, is bit-identical to before: at 0.0 NO Dropout layer is inserted, so
+        # the module list and its forward RNG stream are exactly the old ones. The baseline MLP
+        # tunes dropout via Optuna, adding a Dropout after each ReLU only when it is > 0.
         #self.flatten = nn.Flatten() # Flattens the 2D image into a 1D array
         self.layer1 = nn.Linear(input_size, hidden_size)
         self.hidden_layers = nn.ModuleList()
         for _ in range(num_layers - 2):
             self.hidden_layers.append(nn.Linear(hidden_size, hidden_size))
         self.output_layer = nn.Linear(hidden_size, output_size)
-        self.linear_relu_stack = nn.Sequential(
-            self.layer1,
-            nn.ReLU(),
-            *[layer for hidden_layer in self.hidden_layers for layer in (hidden_layer, nn.ReLU())],
-            self.output_layer
-        )
+        # Build the stack explicitly so a fresh Dropout follows each ReLU only when dropout > 0
+        # (at 0.0 the list is exactly [Linear, ReLU, (Linear, ReLU)*, Linear] as before).
+        layers = [self.layer1, nn.ReLU()]
+        if dropout > 0:
+            layers.append(nn.Dropout(dropout))
+        for hidden_layer in self.hidden_layers:
+            layers.extend([hidden_layer, nn.ReLU()])
+            if dropout > 0:
+                layers.append(nn.Dropout(dropout))
+        layers.append(self.output_layer)
+        self.linear_relu_stack = nn.Sequential(*layers)
 
     def forward(self, x):
         logits = self.linear_relu_stack(x)

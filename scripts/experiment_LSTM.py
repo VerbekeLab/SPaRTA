@@ -19,7 +19,8 @@ import optuna
 from sklearn.metrics import average_precision_score
 
 from src.utils.setup import (load_config, resolve_dataset, resolve_timing,
-                             resolve_sequence, run_tag, suggest_param)
+                             resolve_sequence, run_tag, suggest_param,
+                             resolve_storage, make_pruner, remaining_trials)
 from src.data.sequence_data import (build_sequence_dataset, temporal_split,
                                      fit_scaler, apply_scaler)
 from src.methods.models import LSTMClassifier, TransformerClassifier
@@ -58,12 +59,15 @@ def predict(model, X_t, mask_t, device, batch_size=4096):
 
 def train_model(model, train_tensors, val_tensors, device, loss="bce", lr=1e-3,
                 batch_size=16, max_epochs=300, patience=30, alpha=0.75, gamma=2.0,
-                pos_weight=None):
+                pos_weight=None, weight_decay=1e-5, trial=None):
     """Mini-batch Adam, early-stop on the GIVEN val tensors by AUC-PR, restore best.
 
     train_tensors = (X[N,K,F] f32, mask[N,K] bool, y[N] f32); val_tensors = (Xv,mv,yv).
     Returns (best_val_aucpr, best_state). Adapts the notebook's train_eval to the
-    explicit temporal val band (no random carve); shuffling seeded with 1997."""
+    explicit temporal val band (no random carve); shuffling seeded with 1997. weight_decay is
+    tuned (defaults to the old fixed 1e-5). When `trial` is given (Optuna tuning), the
+    best-so-far val AUC-PR is reported each epoch and the trial is pruned if it tracks below
+    the running median of completed trials."""
     Xa, ma, ya = train_tensors
     Xv, mv, yv = val_tensors
     Xa, ma, ya = Xa.to(device), ma.to(device), ya.to(device)
@@ -76,7 +80,7 @@ def train_model(model, train_tensors, val_tensors, device, loss="bce", lr=1e-3,
     model.to(device)
     pw = pos_weight.to(device) if pos_weight is not None else None
     criterion = make_loss(loss, pos_weight=pw, alpha=alpha, gamma=gamma)
-    opt = torch.optim.Adam(model.parameters(), lr=lr, weight_decay=1e-5)
+    opt = torch.optim.Adam(model.parameters(), lr=lr, weight_decay=weight_decay)
 
     best_ap, best_state, wait = -1.0, None, 0
     for epoch in range(max_epochs):
@@ -92,34 +96,42 @@ def train_model(model, train_tensors, val_tensors, device, loss="bce", lr=1e-3,
             best_state = {k: v.detach().clone() for k, v in model.state_dict().items()}
         else:
             wait += 1
-            if wait >= patience:
-                break
+        # Report best-so-far (monotone) so the pruner compares each trial's best at matching
+        # epochs; reported before the early-stop break so the final epoch is always recorded.
+        if trial is not None:
+            trial.report(best_ap, epoch)
+            if trial.should_prune():
+                raise optuna.TrialPruned()
+        if wait >= patience:
+            break
     if best_state is not None:
         model.load_state_dict(best_state)
     return best_ap, best_state
 
 
 def _tune_arch(arch, study_name, storage, n_trials, search_space, n_features,
-               train_tensors, val_tensors, device, pos_weight):
-    """One Optuna study for an architecture: maximise val-band AUC-PR via
-    train_model. Returns (best_params, best_value)."""
+               train_tensors, val_tensors, device, pos_weight, pruner=None):
+    """One Optuna study for an architecture: maximise val-band AUC-PR via train_model.
+    Returns (best_params, best_value). MedianPruner (via `pruner`) stops trials tracking below
+    the median early; per-study `storage` makes it resumable and n_trials tops up on resume."""
     def objective(trial):
         params = {name: suggest_param(trial, name, spec) for name, spec in search_space.items()}
         model = make_model(arch, params, n_features)
-        # 'epochs' is the max_epochs upper bound; early stopping (patience) usually
-        # ends training sooner, so it mostly caps very-long runs rather than fixing length.
+        # 'epochs' is the max_epochs upper bound; early stopping (patience) / pruning usually
+        # end training sooner, so it mostly caps very-long runs rather than fixing length.
         best_ap, _ = train_model(
             model, train_tensors, val_tensors, device,
             loss=params["loss"], lr=params["lr"], batch_size=params["batch_size"],
             max_epochs=params["epochs"], alpha=params["alpha"], gamma=params["gamma"],
-            pos_weight=pos_weight)
+            weight_decay=params.get("weight_decay", 1e-5), pos_weight=pos_weight, trial=trial)
         return best_ap
 
     sampler = optuna.samplers.TPESampler(seed=SEED)
     study = optuna.create_study(direction="maximize", sampler=sampler,
                                 study_name=study_name, storage=storage,
-                                load_if_exists=True)
-    study.optimize(objective, n_trials=n_trials)
+                                load_if_exists=True,
+                                pruner=(pruner or optuna.pruners.NopPruner()))
+    study.optimize(objective, n_trials=remaining_trials(study, n_trials))
     return study.best_params, study.best_value
 
 
@@ -152,9 +164,8 @@ if __name__ == "__main__":
     ts_cfg = method_config[dataset]["timeseries"]
     search_space = ts_cfg["search_space"]
     n_trials = ts_cfg["n_trials"]
-    storage = ts_cfg.get("storage")
-    if storage:
-        storage = storage.format(dataset=type_dataset)
+    # storage is templated PER STUDY (per architecture) inside the loop via resolve_storage,
+    # so the LSTM and Transformer studies get separate resumable SQLite files.
 
     # Per-combo stem for all outputs (tag already encodes echo + snapshot grid).
     stem = f"{type_dataset}_{tag}_K{K}_{task}"
@@ -211,8 +222,9 @@ if __name__ == "__main__":
              ("transformer", f"Transformer_{stem}", "Transformer")]
     for arch, study_name, label in archs:
         best_params, best_value = _tune_arch(
-            arch, study_name, storage, n_trials, search_space, n_features,
-            train_tensors, val_tensors, device, pos_weight)
+            arch, study_name, resolve_storage(ts_cfg, study_name=study_name), n_trials,
+            search_space, n_features, train_tensors, val_tensors, device, pos_weight,
+            pruner=make_pruner(ts_cfg))
         best_params_all[label] = {"best_params": best_params, "best_value_AUCPR": best_value}
 
         torch.manual_seed(SEED)
@@ -221,7 +233,7 @@ if __name__ == "__main__":
                     loss=best_params["loss"], lr=best_params["lr"],
                     batch_size=best_params["batch_size"], max_epochs=best_params["epochs"],
                     alpha=best_params["alpha"], gamma=best_params["gamma"],
-                    pos_weight=pos_weight)
+                    weight_decay=best_params.get("weight_decay", 1e-5), pos_weight=pos_weight)
         scores[label] = predict(model, test_tensors[0], test_tensors[1], device)
 
         torch.save(
