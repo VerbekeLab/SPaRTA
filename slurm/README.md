@@ -50,7 +50,7 @@ update each script's `--array` range to match (the dynamic scripts source this f
 grid itself stays in lockstep — only the `#SBATCH --array=` line is hand-kept):
 
 - `extract_features_dynamic.slurm`: `0-3` (timing combos)
-- `train_lstm.slurm` / `train_baseline.slurm`: `0-23` (timing × K × task)
+- `train_lstm.slurm` / `train_baseline.slurm` / `train_baseline_nn.slurm`: `0-23` (timing × K × task)
 - `extract_features.slurm`, `train_features.slurm`, `train_cnn.slurm`: no array (one job = one dataset)
 
 ## What depends on what
@@ -59,7 +59,14 @@ grid itself stays in lockstep — only the `#SBATCH --array=` line is hand-kept)
   **timing-independent** → static features extracted once per dataset.
 - **Dynamic models** (`experiment_LSTM.py` = LSTM/Transformer, `experiment_baseline.py` =
   XGB/MLP/IsolationForest) read `results/features/<tag>/` → one run per (tag × K × task),
-  per dataset.
+  per dataset. The MLP is split into its own GPU script, `train_baseline_nn.slurm` — on
+  these window sizes (millions of rows) mini-batch training is far slower per Optuna trial
+  than XGBoost's single tree fit, and needs the GPU + bigger batches that `train_baseline.slurm`
+  (CPU, XGBoost + IsolationForest only) doesn't provide. See `train_baseline_nn.slurm`'s header.
+  LSTM and Transformer share the same GPU resources, so `train_lstm.slurm` tunes both
+  sequentially by default; pass `lstm` or `transformer` as a 2nd arg (or set
+  `SPARTA_SEQ_MODELS`) to fan them into separate concurrent tasks instead — see that
+  script's header.
 
 ## Submission order (per dataset)
 
@@ -76,8 +83,9 @@ EXTRACT_DYN=$(sbatch --parsable slurm/extract_features_dynamic.slurm $DS)     # 
 sbatch --dependency=afterok:$EXTRACT_STATIC slurm/train_features.slurm $DS    # 1 task   (CPU)
 sbatch --dependency=afterok:$EXTRACT_STATIC slurm/train_cnn.slurm $DS         # 1 task   (GPU)
 #    Dynamic models depend on the dynamic extraction:
-LSTM=$(sbatch --parsable --dependency=afterok:$EXTRACT_DYN slurm/train_lstm.slurm $DS)     # 24 (GPU)
-BASE=$(sbatch --parsable --dependency=afterok:$EXTRACT_DYN slurm/train_baseline.slurm $DS) # 24 (CPU)
+LSTM=$(sbatch --parsable --dependency=afterok:$EXTRACT_DYN slurm/train_lstm.slurm $DS)        # 24 (GPU)
+BASE=$(sbatch --parsable --dependency=afterok:$EXTRACT_DYN slurm/train_baseline.slurm $DS)    # 24 (CPU: XGBoost + IsolationForest)
+BASE_NN=$(sbatch --parsable --dependency=afterok:$EXTRACT_DYN slurm/train_baseline_nn.slurm $DS) # 24 (GPU: MLP)
 ```
 
 Once the training jobs of **all datasets you care about** have finished, aggregate
@@ -86,7 +94,7 @@ per-combo cell block the summary — it's reported as a gap instead):
 
 ```bash
 # collect all LSTM/baseline job ids across the datasets you ran, e.g.:
-sbatch --dependency=afterany:$LSTM_AMLWORLD:$BASE_AMLWORLD:$LSTM_AMLSIM:$BASE_AMLSIM:$LSTM_TIDE:$BASE_TIDE slurm/collect.slurm
+sbatch --dependency=afterany:$LSTM_AMLWORLD:$BASE_AMLWORLD:$BASE_NN_AMLWORLD:$LSTM_AMLSIM:$BASE_AMLSIM:$BASE_NN_AMLSIM:$LSTM_TIDE:$BASE_TIDE:$BASE_NN_TIDE slurm/collect.slurm
 ```
 
 `collect.slurm` needs no dataset argument — it sweeps whatever per-combo outputs exist in
@@ -97,7 +105,7 @@ they have finished; to force it strictly after those too, add their job ids to i
 
 Tips: append `%8` to a training script's `--array` (e.g. `0-23%8`) to cap concurrent tasks if
 your GPU/CPU allocation is limited. Raise `--time=` or shrink `timeseries.n_trials` in
-`config/methods/config.yaml` if the 12 h LSTM wall time is tight.
+`config/methods/config.yaml` if the 24 h LSTM wall time is tight.
 
 ## Limited disk: stage one dataset at a time
 
@@ -127,5 +135,8 @@ VGG16 writes only a model file (no metrics dump), so it does **not** appear in `
 - `results/features/{type}_static_features.parquet` — static features (flat, shared).
 - `results/timeseries/<tag>/…npz` — per-combo windowed cache (the tag kills the stale-cache bug).
 - `results/experiments/{type}_{tag}_K{K}_{task}_{timeseries|baselines}.txt|.png` — per-combo metrics.
-- `results/tuning/…_best_params.json` — best HPs per combo / model.
+- `results/experiments/{type}_CNN.txt|.png` — static CNN test metrics (timing-independent).
+- `results/tuning/…_best_params.json` — best HPs (+ val AUC-PR where tuned) per combo / model.
+- `results/models/{LSTM|Transformer}_{type}_{tag}_K{K}_{task}.pt`, `results/models/CNN_{type}.pt` —
+  saved checkpoints (state_dict + best params). XGBoost/MLP/IsolationForest are not checkpointed.
 - `results/experiments/summary.csv` — the one tidy table for the effect-of-timing analysis.

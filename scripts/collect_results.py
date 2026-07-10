@@ -1,15 +1,14 @@
 # Aggregate every model's metrics into one tidy long-format table for the
-# "effect of timing parameters" analysis. Walks results/experiments/ (metric dumps from
-# experiment_LSTM.py / experiment_baseline.py / experiment_features.py) and results/tuning/
-# (the CNN's tuning JSON, which is HPO-only — see below) and writes
-# results/experiments/summary.csv with one row per (dataset, run_tag, K, task, model).
+# "effect of timing parameters" analysis. Walks results/experiments/ for metric dumps from
+# experiment_LSTM.py / experiment_baseline.py / experiment_features.py / experiment_CNN.py
+# and writes results/experiments/summary.csv with one row per (dataset, run_tag, K, task, model).
 #
 # Run from the repo root: python scripts/collect_results.py
 #
 # Filename conventions parsed (set by the experiment scripts):
 #   dynamic:  {type}_{tag}_K{K}_{task}_{timeseries|baselines}.txt   (write_metrics blocks)
 #   static:   {type}_features_{LogisticRegression|XGBoost|NN}.txt   (single-model dump)
-#   CNN:      results/tuning/CNN_{type}_best_params.json            (val AUC-PR only)
+#   CNN:      {type}_CNN.txt                                        (write_metrics block, test split)
 # where tag matches <g><step>_(echo<days>|w<width>) with g the time_type initial
 # (d=days, h=hours, ...), e.g. d1_echo3 / d2_w3 / h6_echo1.
 import os
@@ -20,19 +19,19 @@ sys.path.append(DIR)
 
 import re
 import glob
-import json
 import pandas as pd
 
 EXP_DIR = "results/experiments"
-TUNING_DIR = "results/tuning"
 OUT_PATH = os.path.join(EXP_DIR, "summary.csv")
 
 # {type}_{tag}_K{K}_{task}_{kind}[_<models>].txt — tag has the fixed <g><step>_(echo<d>|w<w>)
 # shape (g = run_tag's time_type initial: d, h, ...), so the non-greedy {type} can't swallow it.
 # type may contain hyphens (HI-Small) but no '_'. The optional trailing _<models> group is the
-# baseline fan-out suffix (experiment_baseline.py with SPARTA_BASELINE_MODELS): per-model tasks
-# write e.g. ..._baselines_XGBoost.txt / ..._baselines_NeuralNetwork-IsolationForest.txt. It is
-# purely for filename uniqueness; the actual model names come from the 'Model:' blocks inside.
+# per-model/per-arch fan-out suffix (experiment_baseline.py with SPARTA_BASELINE_MODELS, or
+# experiment_LSTM.py with SPARTA_SEQ_MODELS): per-model/per-arch tasks write e.g.
+# ..._baselines_XGBoost.txt / ..._baselines_NeuralNetwork-IsolationForest.txt /
+# ..._timeseries_LSTM.txt. It is purely for filename uniqueness; the actual model names come
+# from the 'Model:' blocks inside.
 DYNAMIC_RE = re.compile(
     r"^(?P<type>.+?)_(?P<tag>[a-z]\d+_(?:echo\d+|w\d+))_K(?P<K>\d+)_"
     r"(?P<task>nowcast|forecast)_(?P<kind>timeseries|baselines)"
@@ -41,6 +40,7 @@ DYNAMIC_RE = re.compile(
 STATIC_RE = re.compile(
     r"^(?P<type>.+)_features_(?P<model>LogisticRegression|XGBoost|NN)\.txt$"
 )
+CNN_RE = re.compile(r"^(?P<type>.+)_CNN\.txt$")
 _PR = re.compile(r"AUC PR:\s*([0-9.eE+\-]+)")
 _ROC = re.compile(r"AUC ROC:\s*([0-9.eE+\-]+)")
 
@@ -96,22 +96,18 @@ def collect():
                              AUC_ROC=_f(_ROC.search(text))))
             continue
 
+        c = CNN_RE.match(fname)
+        if c:
+            # experiment_CNN: single-model write_metrics dump, scored on the test band.
+            for model, (pr, roc) in parse_write_metrics(text).items():
+                rows.append(dict(dataset=c["type"], run_tag="static", K=None, task=None,
+                                 model=model, split="test", AUC_PR=pr, AUC_ROC=roc))
+            continue
+
         # *_HPT_features_XGBoost.txt and anything else are not metric dumps — skip quietly
         # only if they clearly aren't (no AUC PR line); otherwise flag for the user.
         if "HPT" not in fname and _PR.search(text):
             unparsed.append(fname)
-
-    # CNN: HPO-only (experiment_CNN.py reports the best VAL AUC-PR, never trains+scores
-    # the test band), so its result lives in the tuning JSON, recorded as split=val.
-    for path in sorted(glob.glob(os.path.join(TUNING_DIR, "CNN_*_best_params.json"))):
-        try:
-            d = json.load(open(path))
-        except (json.JSONDecodeError, OSError):
-            unparsed.append(os.path.basename(path))
-            continue
-        rows.append(dict(dataset=d.get("dataset"), run_tag="static", K=None, task=None,
-                         model="CNN", split="val",
-                         AUC_PR=d.get("best_value_AUCPR"), AUC_ROC=None))
 
     df = pd.DataFrame(rows, columns=["dataset", "run_tag", "K", "task", "model",
                                      "split", "AUC_PR", "AUC_ROC"])

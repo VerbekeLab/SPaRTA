@@ -110,19 +110,22 @@ def train_model(model, train_tensors, val_tensors, device, loss="bce", lr=1e-3,
 
 
 def _tune_arch(arch, study_name, storage, n_trials, search_space, n_features,
-               train_tensors, val_tensors, device, pos_weight, pruner=None):
+               train_tensors, val_tensors, device, pos_weight, patience, pruner=None):
     """One Optuna study for an architecture: maximise val-band AUC-PR via train_model.
     Returns (best_params, best_value). MedianPruner (via `pruner`) stops trials tracking below
     the median early; per-study `storage` makes it resumable and n_trials tops up on resume."""
     def objective(trial):
         params = {name: suggest_param(trial, name, spec) for name, spec in search_space.items()}
+        # Reseed before each trial (mirrors experiment_baseline.py's _fit_predict) so trials
+        # differ only by hyperparameters, not by weight init / batch order.
+        torch.manual_seed(SEED)
         model = make_model(arch, params, n_features)
         # 'epochs' is the max_epochs upper bound; early stopping (patience) / pruning usually
         # end training sooner, so it mostly caps very-long runs rather than fixing length.
         best_ap, _ = train_model(
             model, train_tensors, val_tensors, device,
             loss=params["loss"], lr=params["lr"], batch_size=params["batch_size"],
-            max_epochs=params["epochs"], alpha=params["alpha"], gamma=params["gamma"],
+            max_epochs=params["epochs"], patience=patience, alpha=params["alpha"], gamma=params["gamma"],
             weight_decay=params.get("weight_decay", 1e-5), pos_weight=pos_weight, trial=trial)
         return best_ap
 
@@ -164,11 +167,41 @@ if __name__ == "__main__":
     ts_cfg = method_config[dataset]["timeseries"]
     search_space = ts_cfg["search_space"]
     n_trials = ts_cfg["n_trials"]
+    patience = ts_cfg["patience"]
     # storage is templated PER STUDY (per architecture) inside the loop via resolve_storage,
     # so the LSTM and Transformer studies get separate resumable SQLite files.
 
     # Per-combo stem for all outputs (tag already encodes echo + snapshot grid).
     stem = f"{type_dataset}_{tag}_K{K}_{task}"
+
+    # Which architectures this job runs. SPARTA_SEQ_MODELS (comma-separated) lets a sweep fan
+    # LSTM and Transformer out into SEPARATE Slurm tasks so their Optuna studies run
+    # CONCURRENTLY (wall-clock ~= the slower architecture, not LSTM+Transformer summed under
+    # one time budget) rather than sequentially in one job. Unset / "all" -> both, i.e. the
+    # original single-job behaviour with the original unsuffixed output names. Mirrors
+    # experiment_baseline.py's SPARTA_BASELINE_MODELS.
+    ALL_ARCHS = ["LSTM", "Transformer"]
+    _ARCH_ALIASES = {"lstm": "LSTM", "transformer": "Transformer"}
+    raw_sel = os.environ.get("SPARTA_SEQ_MODELS", "all").strip().lower()
+    if raw_sel in ("", "all"):
+        selected = list(ALL_ARCHS)
+    else:
+        chosen = set()
+        for tok in raw_sel.split(","):
+            tok = tok.strip()
+            if not tok:
+                continue
+            if tok not in _ARCH_ALIASES:
+                raise SystemExit(
+                    f"Unknown seq model {tok!r} in SPARTA_SEQ_MODELS; "
+                    f"known aliases: {sorted(_ARCH_ALIASES)}")
+            chosen.add(_ARCH_ALIASES[tok])
+        selected = [m for m in ALL_ARCHS if m in chosen]
+
+    # When a strict subset of architectures runs (fan-out mode), suffix the outputs by the
+    # selected archs so concurrent per-arch tasks never overwrite each other; collect_results.py's
+    # DYNAMIC_RE already parses both the combined and per-arch names (same as the baselines).
+    model_suffix = "" if selected == ALL_ARCHS else "_" + "-".join(selected)
 
     # --- Build the windowed dataset (T derived from the dataset's snapshot grid).
     # features_dir + cache_dir are namespaced by `tag` so each timing combo reads its own
@@ -220,10 +253,11 @@ if __name__ == "__main__":
     # (overwriting saved models/params or resuming an incompatible SQLite study).
     archs = [("lstm", f"LSTM_{stem}", "LSTM"),
              ("transformer", f"Transformer_{stem}", "Transformer")]
+    archs = [a for a in archs if a[2] in selected]
     for arch, study_name, label in archs:
         best_params, best_value = _tune_arch(
             arch, study_name, resolve_storage(ts_cfg, study_name=study_name), n_trials,
-            search_space, n_features, train_tensors, val_tensors, device, pos_weight,
+            search_space, n_features, train_tensors, val_tensors, device, pos_weight, patience,
             pruner=make_pruner(ts_cfg))
         best_params_all[label] = {"best_params": best_params, "best_value_AUCPR": best_value}
 
@@ -232,7 +266,7 @@ if __name__ == "__main__":
         train_model(model, train_tensors, val_tensors, device,
                     loss=best_params["loss"], lr=best_params["lr"],
                     batch_size=best_params["batch_size"], max_epochs=best_params["epochs"],
-                    alpha=best_params["alpha"], gamma=best_params["gamma"],
+                    patience=patience, alpha=best_params["alpha"], gamma=best_params["gamma"],
                     weight_decay=best_params.get("weight_decay", 1e-5), pos_weight=pos_weight)
         scores[label] = predict(model, test_tensors[0], test_tensors[1], device)
 
@@ -242,14 +276,16 @@ if __name__ == "__main__":
             f"results/models/{study_name}.pt")
 
     # --- Persist best params, metrics, and the ROC/PR comparison figure (per-combo stem).
-    with open(f"results/tuning/timeseries_{stem}_best_params.json", "w") as f:
+    # model_suffix is "" for an all-archs run (original filenames) and "_<archs>" for a
+    # per-arch fan-out task.
+    with open(f"results/tuning/timeseries_{stem}{model_suffix}_best_params.json", "w") as f:
         json.dump({"dataset": type_dataset, "run_tag": tag, "task": task, "K": K, "echo": echo,
                    "models": best_params_all}, f, indent=2)
 
-    metrics_path = f"results/experiments/{stem}_timeseries.txt"
+    metrics_path = f"results/experiments/{stem}_timeseries{model_suffix}.txt"
     evaluation.write_metrics(metrics_path, scores, y_test)
     evaluation.plot_curves(
         scores, y_test,
         f"Time-series ({task}, {tag}) — {type_dataset} (n={len(y_test)}, {int(y_test.sum())} positive)",
-        save_path=f"results/experiments/{stem}_timeseries.png")
+        save_path=f"results/experiments/{stem}_timeseries{model_suffix}.png")
     print(f"Wrote metrics -> {metrics_path}")

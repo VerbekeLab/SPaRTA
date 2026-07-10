@@ -24,7 +24,7 @@
 #SBATCH --gpus-per-node=1
 
 #SBATCH --clusters=wice
-#SBATCH --partition=gpu_h100
+#SBATCH --partition=gpu_a100
 #SBATCH --account=lp_verbekelab
 
 #SBATCH --mail-type=ALL

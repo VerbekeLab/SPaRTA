@@ -29,8 +29,8 @@ SEED = 1997
 def run_xgb_baseline(Xtr2d, ytr, Xval2d, yval, Xte2d, search_space, seed=SEED, n_trials=20,
                      study_name=None, storage=None, early_stopping_rounds=None):
     """XGBoost on already-2D feature arrays. Optuna tuning of AUC-PR on the (Xval2d, yval)
-    band only (no CV shuffle). Returns (probs_te, best_params). Imbalance via scale_pos_weight
-    (mirrors the bce pos_weight in the sequence models).
+    band only (no CV shuffle). Returns (probs_te, best_params, best_value). Imbalance via
+    scale_pos_weight (mirrors the bce pos_weight in the sequence models).
 
     early_stopping_rounds (native XGBoost, on the val band) bounds each trial's tree count, so
     the tuned n_estimators is an UPPER cap and predict_proba uses the best iteration. XGBoost
@@ -63,7 +63,7 @@ def run_xgb_baseline(Xtr2d, ytr, Xval2d, yval, Xte2d, search_space, seed=SEED, n
     study.optimize(objective, n_trials=remaining_trials(study, n_trials))
     best_params = study.best_params
 
-    return _fit(**best_params).predict_proba(Xte2d)[:, 1], best_params
+    return _fit(**best_params).predict_proba(Xte2d)[:, 1], best_params, study.best_value
 
 
 def run_nn_baseline(Xtr2d, ytr, Xval2d, yval, Xte2d, search_space, seed=SEED,
@@ -76,7 +76,7 @@ def run_nn_baseline(Xtr2d, ytr, Xval2d, yval, Xte2d, search_space, seed=SEED,
     Imbalance via BCEWithLogitsLoss pos_weight (= neg/pos, the same rule the sequence
     models use). torch is imported lazily here (after the module-level xgboost import) to
     keep the tree-only path light and preserve the xgboost-before-torch OpenMP order.
-    Returns (probs_te, best_params)."""
+    Returns (probs_te, best_params, best_value)."""
     import torch
     import torch.nn as nn
     from torch.utils.data import TensorDataset, DataLoader
@@ -163,7 +163,7 @@ def run_nn_baseline(Xtr2d, ytr, Xval2d, yval, Xte2d, search_space, seed=SEED,
 
     # Refit the best config on train (early-stopped on val, as in run_xgb_baseline) and score test.
     _, probs_te = _fit_predict(best_params, Xte)
-    return probs_te, best_params
+    return probs_te, best_params, study.best_value
 
 
 def run_iforest_baseline(Xtr2d, Xte2d, params=None, seed=SEED):
@@ -215,7 +215,9 @@ if __name__ == "__main__":
     bl_cfg = method_config[dataset]["baselines"]
     xgb_search_space = bl_cfg["xgb_search_space"]
     nn_search_space = bl_cfg["nn_search_space"]
-    n_trials = bl_cfg["n_trials"]            # Optuna budget, shared by XGBoost and the MLP
+    n_trials = bl_cfg["n_trials"]            # XGBoost's Optuna budget
+    nn_n_trials = bl_cfg.get("nn_n_trials", n_trials)  # MLP's own (smaller) budget — see config
+    patience = bl_cfg["patience"]            # MLP early-stop patience (XGBoost uses its own below)
     iforest_params = bl_cfg.get("iforest", {})
     # Resumable per-study SQLite storage + MedianPruner (MLP) + XGBoost native early stopping.
     xgb_esr = bl_cfg.get("xgb_early_stopping_rounds")
@@ -295,20 +297,20 @@ if __name__ == "__main__":
     # --- XGBoost (supervised, tuned on the val band; native early stopping, resumable study).
     if "XGBoost" in selected:
         xgb_study = f"baseline_xgb_{stem}"
-        scores["XGBoost"], xgb_best = run_xgb_baseline(
+        scores["XGBoost"], xgb_best, xgb_value = run_xgb_baseline(
             Xtr2d, ytr, Xval2d, yval, Xte2d, xgb_search_space, seed=SEED, n_trials=n_trials,
             study_name=xgb_study, storage=resolve_storage(bl_cfg, study_name=xgb_study),
             early_stopping_rounds=xgb_esr)
-        best_params_all["XGBoost"] = {"best_params": xgb_best}
+        best_params_all["XGBoost"] = {"best_params": xgb_best, "best_value_AUCPR": xgb_value}
 
     # --- Feed-forward MLP (supervised, tuned on the val band; standardised inputs; pruned + resumable).
     if "NeuralNetwork" in selected:
         nn_study = f"baseline_nn_{stem}"
-        scores["NeuralNetwork"], nn_best = run_nn_baseline(
-            Xtr2d, ytr, Xval2d, yval, Xte2d, nn_search_space, seed=SEED, n_trials=n_trials,
-            study_name=nn_study, storage=resolve_storage(bl_cfg, study_name=nn_study),
+        scores["NeuralNetwork"], nn_best, nn_value = run_nn_baseline(
+            Xtr2d, ytr, Xval2d, yval, Xte2d, nn_search_space, seed=SEED, n_trials=nn_n_trials,
+            patience=patience, study_name=nn_study, storage=resolve_storage(bl_cfg, study_name=nn_study),
             pruner=make_pruner(bl_cfg))
-        best_params_all["NeuralNetwork"] = {"best_params": nn_best}
+        best_params_all["NeuralNetwork"] = {"best_params": nn_best, "best_value_AUCPR": nn_value}
 
     # --- Isolation Forest (unsupervised, fixed params — labels are not used).
     if "IsolationForest" in selected:

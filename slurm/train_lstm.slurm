@@ -7,10 +7,18 @@
 # outputs keyed by the {type}_{tag}_K{K}_{task} stem, so combos don't overwrite. GPU job —
 # experiment_LSTM.py moves model + tensors to cuda when available.
 #
+# Both architectures use the SAME GPU resources, so by default one task tunes LSTM then
+# Transformer sequentially, summing their Optuna time budgets. Pass the architecture as a 2nd
+# arg, or export SPARTA_SEQ_MODELS (lstm|transformer|all), to fan them into separate tasks
+# that run CONCURRENTLY instead (wall-clock ~= the slower architecture):
+#   sbatch slurm/train_lstm.slurm AMLWorld lstm   # then transformer
+# Per-arch tasks suffix their outputs (..._timeseries_LSTM.txt) so they never overwrite each
+# other; collect_results.py reads both the combined and per-arch dumps.
+#
 # Array range = N_TIMING*N_K*N_TASK-1 (4*3*2 -> 0-23). Keep in sync with
 # slurm/sweep_common.sh (run `bash slurm/sweep_common.sh` to print the range).
 # PREREQUISITE: extract_features_dynamic.slurm has finished FOR THIS DATASET — submit with
-#   sbatch --dependency=afterok:<extract_dyn_jobid> slurm/train_lstm.slurm <Dataset>
+#   sbatch --dependency=afterok:<extract_dyn_jobid> slurm/train_lstm.slurm <Dataset> [arch]
 # The per-dataset grids in sweep_common.sh keep every (K, task) cell feasible (the largest
 # K still leaves 18+ train anchors on every dataset); if a future grid edit breaks that,
 # the temporal_split guard fails only its own array task — collect_results.py reports the gap.
@@ -20,14 +28,14 @@
 #SBATCH --error=slurm/logs/train_lstm_%A_%a.err
 # Append %8 (e.g. 0-23%8) to cap concurrent GPU tasks if your allocation is limited.
 #SBATCH --array=0-23
-#SBATCH --time=12:00:00
+#SBATCH --time=24:00:00
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=8
 #SBATCH --gpus-per-node=1
 
 #SBATCH --clusters=wice
-#SBATCH --partition=gpu_h100
+#SBATCH --partition=gpu_a100
 #SBATCH --account=lp_verbekelab
 
 #SBATCH --mail-type=ALL
@@ -50,7 +58,11 @@ export MKL_NUM_THREADS=$SLURM_CPUS_PER_TASK
 source slurm/sweep_common.sh
 resolve_dataset_arg "${1:-}"
 decode_train "$SLURM_ARRAY_TASK_ID"
-echo "[$(date)] LSTM+Transformer+Optuna: dataset=$SPARTA_DATASET tag=$SPARTA_RUN_TAG"\
+
+# Which architectures this task runs: 2nd positional arg, else a pre-set SPARTA_SEQ_MODELS,
+# else both (the original single-job behaviour). See the header for the fan-out mode.
+export SPARTA_SEQ_MODELS="${2:-${SPARTA_SEQ_MODELS:-all}}"
+echo "[$(date)] LSTM+Transformer+Optuna ($SPARTA_SEQ_MODELS): dataset=$SPARTA_DATASET tag=$SPARTA_RUN_TAG"\
      "K=$SPARTA_K task=$SPARTA_TASK on $(nvidia-smi -L 2>/dev/null | head -1)"
 
 python -u scripts/experiment_LSTM.py

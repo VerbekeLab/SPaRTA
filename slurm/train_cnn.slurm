@@ -6,14 +6,14 @@
 #SBATCH --job-name=sparta_cnn
 #SBATCH --output=slurm/logs/train_cnn_%j.out
 #SBATCH --error=slurm/logs/train_cnn_%j.err
-#SBATCH --time=12:00:00
+#SBATCH --time=24:00:00
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=8
 #SBATCH --gpus-per-node=1
 
 #SBATCH --clusters=wice
-#SBATCH --partition=gpu_h100
+#SBATCH --partition=gpu_a100
 #SBATCH --account=lp_verbekelab
 
 #SBATCH --mail-type=ALL
