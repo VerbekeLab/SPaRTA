@@ -220,6 +220,12 @@ if __name__ == "__main__":
         dataset_label=type_dataset)
     mu, sd = fit_scaler(X, mask, nodes, anchors, K, task, train_idx)
     Xs = apply_scaler(X, mask, mu, sd)
+    X_shape = X.shape
+    n_features = X_shape[-1]
+    # X and Xs are each tens of GB at AMLWorld scale, and everything downstream reads only
+    # the scaled copy / the band tensors — free each as soon as its last consumer is done,
+    # or the peak (raw + scaled + tensors ~= 3x one array) blows the job's memory request.
+    del X
 
     # Drop all-masked rows per band (forecast no-history rows; nowcast anchor is
     # always valid, so this is a no-op there).
@@ -232,13 +238,13 @@ if __name__ == "__main__":
     val_tensors = (to_t(Xs[val_idx]), to_t(mask[val_idx], torch.bool), to_t(y[val_idx]))
     test_tensors = (to_t(Xs[test_idx]), to_t(mask[test_idx], torch.bool), to_t(y[test_idx]))
     y_test = y[test_idx]
+    del Xs    # the band tensors above are copies; the full scaled array is no longer needed
 
     # Empirical pos_weight (neg/pos) on the train band — used for the bce loss.
     ytr = y[train_idx]
     pos_weight = to_t([(ytr == 0).sum() / max(1, (ytr == 1).sum())])
 
-    n_features = X.shape[-1]
-    print(f"X{X.shape} | train {len(train_idx)} val {len(val_idx)} test {len(test_idx)} "
+    print(f"X{X_shape} | train {len(train_idx)} val {len(val_idx)} test {len(test_idx)} "
           f"| task={task} K={K} echo={echo}")
 
     os.makedirs("results/tuning", exist_ok=True)

@@ -32,6 +32,11 @@
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=8
+# Sized for AMLWorld's largest cells: the K=17 window tensor is ~37 GB float32 and peaks
+# at ~2x during scaling/band-tensor construction. Without an explicit --mem the job gets
+# only the small per-core default share and is OOM-killed before the first trial. AMLSim
+# and Tide need far less — override at submit time (sbatch --mem=32G ...) if queueing matters.
+#SBATCH --mem=128G
 #SBATCH --gpus-per-node=1
 
 #SBATCH --clusters=wice

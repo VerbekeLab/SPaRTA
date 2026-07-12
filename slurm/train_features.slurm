@@ -14,6 +14,7 @@
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=8
+#SBATCH --mem=32G
 
 #SBATCH --clusters=wice
 #SBATCH --partition=batch

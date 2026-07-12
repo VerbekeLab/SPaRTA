@@ -39,6 +39,11 @@
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=8
+# Sized for AMLWorld's largest cells: forecast K=17 keeps the ~37 GB window tensor plus the
+# flattened 2D band arrays (same size again) plus XGBoost's internal DMatrix in memory at
+# once. Without --mem the per-core default share OOM-kills the task during data prep.
+# Override smaller at submit time for AMLSim/Tide if queueing matters.
+#SBATCH --mem=128G
 
 #SBATCH --clusters=wice
 #SBATCH --partition=batch

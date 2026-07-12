@@ -135,13 +135,20 @@ def build_sequence_dataset(dataset, type_dataset, echo, K, task,
             anchor_rows.append(a)
             node_rows.append(node)
 
+    # Free each source as soon as it is converted: X_rows holds a second full copy of X's
+    # data (millions of small arrays at AMLWorld scale) and snapshots several GB of frames,
+    # so dropping them here — plus the in-place nan scrub — keeps the build's peak at ~2x
+    # the final X (list + array, briefly) instead of ~3x.
+    del snapshots
     X = np.asarray(X_rows, dtype=np.float32).reshape(-1, K, N_FEATURES)
+    del X_rows
     mask = np.asarray(mask_rows, dtype=bool).reshape(-1, K)
+    del mask_rows
     y = np.asarray(y_rows, dtype=np.float32)
     anchors = np.asarray(anchor_rows, dtype=int)
     nodes = np.asarray(node_rows, dtype=object)
 
-    X = np.nan_to_num(X, nan=0.0, posinf=0.0, neginf=0.0)
+    X = np.nan_to_num(X, copy=False, nan=0.0, posinf=0.0, neginf=0.0)
 
     if use_cache:
         os.makedirs(cache_dir, exist_ok=True)
@@ -201,10 +208,14 @@ def fit_scaler(X, mask, nodes, anchors, K, task, train_idx):
 
 
 def apply_scaler(X, mask, mu, sd):
-    """(X - mu) / sd, then re-zero padded (~mask) steps so mask semantics hold."""
-    Xs = (X - mu) / sd
+    """(X - mu) / sd, then re-zero padded (~mask) steps so mask semantics hold.
+    Allocates exactly ONE full-size array (in-place divide, no-copy cast): X is tens of
+    GB at AMLWorld scale, so every avoided temporary is a real slice of the job's memory
+    cap. Same float32 elementwise ops as the old chained expression — identical output."""
+    Xs = X - mu
+    Xs /= sd
     Xs[~mask] = 0
-    return Xs.astype(np.float32)
+    return Xs.astype(np.float32, copy=False)
 
 
 def temporal_split(anchors, y, n_test_anchors=1, n_val_anchors=1, dataset_label=None):

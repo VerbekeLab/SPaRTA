@@ -184,9 +184,14 @@ def _xgb_arrays(X, K, task):
     forecast -> ALL K window steps flattened (K*90). The forecast window [a-K..a-1]
     already excludes the anchor (builder offsets base=a-K), so every step is history;
     the baselines must see the same K-step history the sequence models do — slicing it
-    shorter would silently handicap them and confound the sequential-vs-not comparison."""
+    shorter would silently handicap them and confound the sequential-vs-not comparison.
+
+    Callers pass a fancy-indexed band copy of the (huge) window tensor; nowcast copies its
+    single step out contiguously so that K-times-larger temporary can be freed, instead of
+    being pinned alive by a strided view. (Forecast's reshape IS the whole block — a view
+    there wastes nothing.)"""
     if task == "nowcast":
-        return X[:, K - 1, :]
+        return np.ascontiguousarray(X[:, K - 1, :])
     return X.reshape(X.shape[0], -1)
 
 
@@ -284,6 +289,7 @@ if __name__ == "__main__":
     Xtr2d = _xgb_arrays(X[train_idx], K, task)
     Xval2d = _xgb_arrays(X[val_idx], K, task)
     Xte2d = _xgb_arrays(X[test_idx], K, task)
+    del X    # tens of GB at AMLWorld scale; the models read only the 2D band arrays above
     print(f"Baselines {selected} | task={task} K={K} echo={echo} | "
           f"train {len(train_idx)} val {len(val_idx)} test {len(test_idx)} "
           f"| 2D feature dim = {Xtr2d.shape[1]}")
