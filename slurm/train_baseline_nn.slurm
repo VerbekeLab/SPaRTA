@@ -23,7 +23,9 @@
 # Sized for AMLWorld's largest cells (K=17 window tensor ~37 GB float32, ~2x peak while
 # slicing the 2D band arrays); without --mem the per-core default share OOM-kills the task
 # during data prep. Override smaller at submit time for AMLSim/Tide if queueing matters.
-#SBATCH --mem=128G
+# 123G is the most a 1-GPU job may request on wice's gpu_a100 (126000 MiB/GPU cap —
+# sbatch rejects anything larger).
+#SBATCH --mem=123G
 #SBATCH --gpus-per-node=1
 
 #SBATCH --clusters=wice

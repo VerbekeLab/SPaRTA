@@ -36,7 +36,9 @@
 # at ~2x during scaling/band-tensor construction. Without an explicit --mem the job gets
 # only the small per-core default share and is OOM-killed before the first trial. AMLSim
 # and Tide need far less — override at submit time (sbatch --mem=32G ...) if queueing matters.
-#SBATCH --mem=128G
+# 123G is the most a 1-GPU job may request on wice's gpu_a100 (126000 MiB/GPU cap —
+# sbatch rejects anything larger).
+#SBATCH --mem=123G
 #SBATCH --gpus-per-node=1
 
 #SBATCH --clusters=wice
