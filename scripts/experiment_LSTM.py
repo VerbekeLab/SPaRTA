@@ -20,7 +20,8 @@ from sklearn.metrics import average_precision_score
 
 from src.utils.setup import (load_config, resolve_dataset, resolve_timing,
                              resolve_sequence, run_tag, suggest_param,
-                             resolve_storage, make_pruner, remaining_trials)
+                             resolve_storage, make_pruner, remaining_trials,
+                             walltime_budget)
 from src.data.sequence_data import (build_sequence_dataset, temporal_split,
                                      fit_scaler, apply_scaler)
 from src.methods.models import LSTMClassifier, TransformerClassifier
@@ -134,7 +135,11 @@ def _tune_arch(arch, study_name, storage, n_trials, search_space, n_features,
                                 study_name=study_name, storage=storage,
                                 load_if_exists=True,
                                 pruner=(pruner or optuna.pruners.NopPruner()))
-    study.optimize(objective, n_trials=remaining_trials(study, n_trials))
+    # timeout: stop starting trials before Slurm's wall-time kill so the final refit and
+    # metrics still get written. Recomputed per call — the second architecture's study
+    # gets whatever wall clock the first left over; both top up on resubmit.
+    study.optimize(objective, n_trials=remaining_trials(study, n_trials),
+                   timeout=walltime_budget())
     return study.best_params, study.best_value
 
 

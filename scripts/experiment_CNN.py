@@ -24,7 +24,8 @@ from src.data.feature_data import ImageDataset
 from src.methods.models import CNN
 from src.methods import evaluation
 from src.utils.setup import (load_config, resolve_dataset, suggest_param,
-                             resolve_storage, make_pruner, remaining_trials)
+                             resolve_storage, make_pruner, remaining_trials,
+                             walltime_budget)
 from src.utils.feature_io import load_table
 
 SEED = 1997
@@ -121,7 +122,11 @@ def _tune_cnn(study_name, storage, n_trials, search_space, num_channels,
         storage=storage,
         load_if_exists=True,
     )
-    study.optimize(objective, n_trials=remaining_trials(study, n_trials))
+    # timeout: stop starting trials before Slurm's wall-time kill (walltime_budget leaves
+    # SPARTA_WALL_MARGIN_S for the in-flight trial + final refit) so best-params/metrics
+    # still get written; the resumed study tops back up to n_trials on resubmit.
+    study.optimize(objective, n_trials=remaining_trials(study, n_trials),
+                   timeout=walltime_budget())
     return study.best_params, study.best_value
 
 

@@ -1,5 +1,6 @@
 # LOAD MODULES
 import os
+import time
 from typing import Any, Dict
 
 # Third party
@@ -169,6 +170,32 @@ def make_pruner(cfg):
     if not spec:
         return optuna.pruners.NopPruner()
     return optuna.pruners.MedianPruner(**spec)
+
+
+def walltime_budget():
+    """Seconds this job may still spend tuning before Slurm's wall-time kill, minus a
+    safety margin — or ``None`` outside Slurm / on pre-23.02 Slurm (no ``SLURM_JOB_END_TIME``
+    env var), where behaviour is unchanged. Pass as ``study.optimize(..., timeout=...)`` so
+    a study that can't finish its trial budget stops CLEANLY: the in-flight trial isn't lost
+    to the kill, and the script still reaches its final refit / metrics dump (which a
+    resubmit then improves on, since the study resumes from storage).
+
+    The margin (``SPARTA_WALL_MARGIN_S``, default 3600) must cover everything that runs
+    AFTER the timeout fires: Optuna never interrupts an in-flight trial — it only stops
+    STARTING new ones — so budget one worst-case trial plus the post-tuning refit/eval.
+    Call at each ``optimize()`` (not once up front): back-to-back studies in one job then
+    each see the wall clock actually left.
+    """
+    try:
+        end = int(os.environ.get("SLURM_JOB_END_TIME", "0"))
+    except ValueError:
+        return None
+    if end <= 0:
+        return None
+    margin = int(os.environ.get("SPARTA_WALL_MARGIN_S", "3600"))
+    # Floor of 60s: optuna checks elapsed-vs-timeout between trials, so even a tiny
+    # budget runs at least one trial — same outcome as today's hard kill, never worse.
+    return max(60.0, end - time.time() - margin)
 
 
 def remaining_trials(study, n_trials):

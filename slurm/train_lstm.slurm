@@ -59,6 +59,10 @@ source activate SPaRTA_env
 export OMP_NUM_THREADS=$SLURM_CPUS_PER_TASK
 export MKL_NUM_THREADS=$SLURM_CPUS_PER_TASK
 
+# Optuna stops starting trials 1h (walltime_budget's default margin) before the wall-time
+# kill so each study ends with its refit/metrics written; trials here are minutes-scale,
+# so the default fits. Export SPARTA_WALL_MARGIN_S to override.
+
 # Dataset from the submission argument; (timing x K x task) from the array index.
 source slurm/sweep_common.sh
 resolve_dataset_arg "${1:-}"

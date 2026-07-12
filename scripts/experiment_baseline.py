@@ -19,7 +19,8 @@ from sklearn.metrics import average_precision_score
 
 from src.utils.setup import (load_config, resolve_dataset, resolve_timing,
                              resolve_sequence, run_tag, suggest_param,
-                             resolve_storage, make_pruner, remaining_trials)
+                             resolve_storage, make_pruner, remaining_trials,
+                             walltime_budget)
 from src.data.sequence_data import build_sequence_dataset, temporal_split
 from src.methods import evaluation
 
@@ -60,7 +61,10 @@ def run_xgb_baseline(Xtr2d, ytr, Xval2d, yval, Xte2d, search_space, seed=SEED, n
     study = optuna.create_study(direction="maximize", sampler=sampler, study_name=study_name,
                                 storage=storage, load_if_exists=True,
                                 pruner=optuna.pruners.NopPruner())
-    study.optimize(objective, n_trials=remaining_trials(study, n_trials))
+    # timeout: stop starting trials before Slurm's wall-time kill so the final refit and
+    # metrics still get written; the resumed study tops back up to n_trials on resubmit.
+    study.optimize(objective, n_trials=remaining_trials(study, n_trials),
+                   timeout=walltime_budget())
     best_params = study.best_params
 
     return _fit(**best_params).predict_proba(Xte2d)[:, 1], best_params, study.best_value
@@ -158,7 +162,10 @@ def run_nn_baseline(Xtr2d, ytr, Xval2d, yval, Xte2d, search_space, seed=SEED,
     study = optuna.create_study(direction="maximize", sampler=sampler, study_name=study_name,
                                 storage=storage, load_if_exists=True,
                                 pruner=(pruner or optuna.pruners.NopPruner()))
-    study.optimize(objective, n_trials=remaining_trials(study, n_trials))
+    # timeout recomputed per call: when this runs after the XGBoost study in one job it
+    # gets whatever wall clock that study left over (see walltime_budget's docstring).
+    study.optimize(objective, n_trials=remaining_trials(study, n_trials),
+                   timeout=walltime_budget())
     best_params = study.best_params
 
     # Refit the best config on train (early-stopped on val, as in run_xgb_baseline) and score test.

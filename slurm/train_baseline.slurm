@@ -66,6 +66,12 @@ source activate SPaRTA_env
 export OMP_NUM_THREADS=$SLURM_CPUS_PER_TASK
 export MKL_NUM_THREADS=$SLURM_CPUS_PER_TASK
 
+# Stop STARTING Optuna trials this long before the wall-time kill (see walltime_budget in
+# src/utils/setup.py). XGBoost trials are single fits (seconds-minutes), so 15 min covers
+# the in-flight trial + final refit + IsolationForest + writes without wasting a quarter
+# of this job's 4h cap the way the helper's 1h default would.
+export SPARTA_WALL_MARGIN_S=900
+
 # Dataset from the submission argument; (timing x K x task) from the array index.
 source slurm/sweep_common.sh
 resolve_dataset_arg "${1:-}"

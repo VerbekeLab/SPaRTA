@@ -29,6 +29,13 @@ export PATH="${VSC_DATA}/miniconda3/bin:${PATH}"
 
 source activate SPaRTA_env
 
+# Stop STARTING Optuna trials this long before the wall-time kill (see walltime_budget in
+# src/utils/setup.py): a running trial is never interrupted and the worst observed AMLWorld
+# trial is ~1h45 (400 epochs), plus up to ~1h for the final refit — so 3h. The study
+# resumes from its SQLite file on resubmit either way; this just guarantees each round
+# ends with best-params/metrics written instead of a mid-trial kill.
+export SPARTA_WALL_MARGIN_S=10800
+
 # Dataset from the submission argument (or SPARTA_DATASET via --export).
 source slurm/sweep_common.sh
 resolve_dataset_arg "${1:-}"
