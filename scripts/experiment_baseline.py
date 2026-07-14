@@ -20,7 +20,7 @@ from sklearn.metrics import average_precision_score
 from src.utils.setup import (load_config, resolve_dataset, resolve_timing,
                              resolve_sequence, run_tag, suggest_param,
                              resolve_storage, make_pruner, remaining_trials,
-                             walltime_budget)
+                             walltime_budget, resolve_ts_cache_dir)
 from src.data.sequence_data import build_sequence_dataset, temporal_split
 from src.methods import evaluation
 
@@ -270,12 +270,14 @@ if __name__ == "__main__":
     model_suffix = "" if selected == ALL_MODELS else "_" + "-".join(selected)
 
     # --- Build the SAME windowed dataset the sequence models use (same tag-namespaced
-    # features_dir + cache_dir as experiment_LSTM.py). The baselines need only the raw
-    # per-task 2D arrays (no scaling — trees and isolation splits are scale-invariant).
+    # features_dir + cache_dir as experiment_LSTM.py; resolve_ts_cache_dir sends the
+    # cache to $VSC_SCRATCH on the cluster, or disables it under SPARTA_TS_CACHE=off).
+    # The baselines need only the raw per-task 2D arrays (no scaling — trees and
+    # isolation splits are scale-invariant).
     X, mask, y, anchors, nodes = build_sequence_dataset(
         dataset, type_dataset, echo, K, task,
         features_dir=os.path.join(bl_cfg.get("data_directory", "results/features"), tag),
-        cache_dir=os.path.join("results/timeseries", tag),
+        cache_dir=resolve_ts_cache_dir(tag),
         time_step=net_cfg["time_step"], time_width=net_cfg["time_width"],
         time_type=net_cfg["time_type"])
 
@@ -338,8 +340,11 @@ if __name__ == "__main__":
 
     metrics_path = f"results/experiments/{stem}_baselines{model_suffix}.txt"
     evaluation.write_metrics(metrics_path, scores, y_test)
-    evaluation.plot_curves(
-        scores, y_test,
-        f"Baselines ({task}, {tag}) — {type_dataset} (n={len(y_test)}, {int(y_test.sum())} positive)",
-        save_path=f"results/experiments/{stem}_baselines{model_suffix}.png")
+    # Curve PNGs disabled: they only compare the models within this run (not across all
+    # experiments) and the per-combo figures add up on VSC storage. The .txt metrics keep
+    # the ROC/PR arrays, so curves can still be re-plotted offline if ever needed.
+    # evaluation.plot_curves(
+    #     scores, y_test,
+    #     f"Baselines ({task}, {tag}) — {type_dataset} (n={len(y_test)}, {int(y_test.sum())} positive)",
+    #     save_path=f"results/experiments/{stem}_baselines{model_suffix}.png")
     print(f"Wrote metrics -> {metrics_path}")

@@ -26,6 +26,18 @@ def _snapshot_index(anchor, step, K, task):
     return base + step
 
 
+def _expand_windows(values, idx):
+    """Rebuild the dense (X, mask) pair from the deduplicated cache layout:
+    `values` [M, F] holds each present (snapshot, node) feature row once and
+    `idx` [N, K] points into it (-1 = node absent at that step)."""
+    mask = idx >= 0
+    if len(values) == 0:
+        return np.zeros((*idx.shape, N_FEATURES), dtype=np.float32), mask
+    X = values[np.maximum(idx, 0)]
+    X[~mask] = 0.0
+    return X, mask
+
+
 def _load_snapshot(i, type_dataset, suffix, features_dir):
     """Read snapshot i's features + labels (Parquet preferred, legacy CSV fallback),
     validate 90 cols, return a node-indexed DataFrame of the 90 features plus an
@@ -106,10 +118,17 @@ def build_sequence_dataset(dataset, type_dataset, echo, K, task,
 
     # Optional cache keyed by (type_dataset, echo, K, task, T) — T is included so a
     # feature regeneration that changes the snapshot count invalidates the stale cache.
-    cache_path = os.path.join(cache_dir, f"{type_dataset}{suffix}_K{K}_T{T}_{task}.npz")
+    # cache_dir=None disables caching entirely (see setup.resolve_ts_cache_dir).
+    use_cache = use_cache and cache_dir is not None
+    cache_path = None if cache_dir is None else os.path.join(
+        cache_dir, f"{type_dataset}{suffix}_K{K}_T{T}_{task}.npz")
     if use_cache and os.path.exists(cache_path):
         d = np.load(cache_path, allow_pickle=True)
-        return d["X"], d["mask"], d["y"], d["anchors"], d["nodes"]
+        if "X" in d.files:  # legacy full-window dump (pre-dedup format)
+            return d["X"], d["mask"], d["y"], d["anchors"], d["nodes"]
+        X, mask = _expand_windows(d["values"], d["idx"])
+        nodes = d["node_values"][d["node_codes"]].astype(object)
+        return X, mask, d["y"], d["anchors"], nodes
 
     # Load + validate every snapshot once.
     snapshots = [_load_snapshot(i, type_dataset, suffix, features_dir) for i in range(T)]
@@ -117,52 +136,67 @@ def build_sequence_dataset(dataset, type_dataset, echo, K, task,
     first_anchor = K - 1 if task == "nowcast" else K
     valid_anchors = list(range(first_anchor, T))
 
-    X_rows, mask_rows, y_rows, anchor_rows, node_rows = [], [], [], [], []
+    # Windows are built (and cached) DEDUPLICATED: `values` holds each present
+    # (snapshot, node) feature row once, `idx[sample, step]` points into it (-1 = node
+    # absent at that step). Adjacent anchors share K-1 snapshots, so the old per-window
+    # X dump wrote each row up to K times — ~K x the disk (zlib can't fold duplicates
+    # that far apart in the stream) and K x the .loc lookups, for no extra information.
+    row_cache = {}  # (snapshot index, node) -> row index into values
+    values_rows = []
+    idx_rows, y_rows, anchor_rows, node_rows = [], [], [], []
     for a in valid_anchors:
         anchor_df = snapshots[a]
         for node in anchor_df.index:
-            win = np.zeros((K, N_FEATURES), dtype=np.float32)
-            m = np.zeros(K, dtype=bool)
+            win_idx = np.full(K, -1, dtype=np.int32)
             for step in range(K):
                 si = _snapshot_index(a, step, K, task)
                 snap = snapshots[si]
                 if node in snap.index:
-                    win[step] = snap.loc[node, keys_to_include].to_numpy(dtype=np.float32)
-                    m[step] = True
-            X_rows.append(win)
-            mask_rows.append(m)
+                    r = row_cache.get((si, node))
+                    if r is None:
+                        r = len(values_rows)
+                        values_rows.append(
+                            snap.loc[node, keys_to_include].to_numpy(dtype=np.float32))
+                        row_cache[(si, node)] = r
+                    win_idx[step] = r
+            idx_rows.append(win_idx)
             y_rows.append(float(anchor_df.loc[node, "is_laundering"]))
             anchor_rows.append(a)
             node_rows.append(node)
 
-    # Free each source as soon as it is converted: X_rows holds a second full copy of X's
-    # data (millions of small arrays at AMLWorld scale) and snapshots several GB of frames,
-    # so dropping them here — plus the in-place nan scrub — keeps the build's peak at ~2x
-    # the final X (list + array, briefly) instead of ~3x.
-    del snapshots
-    X = np.asarray(X_rows, dtype=np.float32).reshape(-1, K, N_FEATURES)
-    del X_rows
-    mask = np.asarray(mask_rows, dtype=bool).reshape(-1, K)
-    del mask_rows
+    # Free each source as soon as it is converted: snapshots hold several GB of frames at
+    # AMLWorld scale, and values_rows/idx_rows are second copies of their arrays. The dedup
+    # layout keeps the build's peak well below the old ~2x-the-final-X: values is ~1/K of X.
+    del snapshots, row_cache
+    values = np.asarray(values_rows, dtype=np.float32).reshape(-1, N_FEATURES)
+    del values_rows
+    idx = np.asarray(idx_rows, dtype=np.int32).reshape(-1, K)
+    del idx_rows
     y = np.asarray(y_rows, dtype=np.float32)
     anchors = np.asarray(anchor_rows, dtype=int)
     nodes = np.asarray(node_rows, dtype=object)
 
-    X = np.nan_to_num(X, copy=False, nan=0.0, posinf=0.0, neginf=0.0)
+    # Scrub the deduplicated rows before expansion — same result as scrubbing X, once per
+    # unique row instead of once per window copy.
+    values = np.nan_to_num(values, copy=False, nan=0.0, posinf=0.0, neginf=0.0)
 
     if use_cache:
         os.makedirs(cache_dir, exist_ok=True)
-        # Compressed: X is mostly zeros (padding + absent nodes), so the plain savez cache was
-        # several times larger on disk for no benefit. Write to a per-process temp file then
-        # os.replace() into place: the fan-out baseline tasks (one per model, e.g. XGBoost and
-        # the MLP) may rebuild the same combo concurrently, and an atomic replace guarantees a
-        # reader sees either no file or a complete one — never a half-written .npz. Passing a
-        # file object stops np.savez_compressed from appending its own ".npz" to the temp name.
+        # Compressed dedup cache: values + int32 idx (mask is derived as idx >= 0, node ids
+        # factorised to codes + uniques). Write to a per-process temp file then os.replace()
+        # into place: the fan-out baseline tasks (one per model, e.g. XGBoost and the MLP)
+        # may rebuild the same combo concurrently, and an atomic replace guarantees a reader
+        # sees either no file or a complete one — never a half-written .npz. Passing a file
+        # object stops np.savez_compressed from appending its own ".npz" to the temp name.
+        node_values, node_codes = np.unique(nodes.astype(str), return_inverse=True)
         tmp_path = f"{cache_path}.{os.getpid()}.tmp"
         with open(tmp_path, "wb") as fh:
-            np.savez_compressed(fh, X=X, mask=mask, y=y, anchors=anchors, nodes=nodes)
+            np.savez_compressed(fh, values=values, idx=idx, y=y, anchors=anchors,
+                                node_codes=node_codes.astype(np.int32),
+                                node_values=node_values)
         os.replace(tmp_path, cache_path)
 
+    X, mask = _expand_windows(values, idx)
     return X, mask, y, anchors, nodes
 
 

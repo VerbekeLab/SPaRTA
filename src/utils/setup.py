@@ -117,6 +117,30 @@ def run_tag(timing: Dict[str, Any]) -> str:
     return f"{grid}_w{int(timing['time_width'])}"
 
 
+def resolve_ts_cache_dir(tag: str) -> str | None:
+    """Per-combo directory for the windowed-dataset ``.npz`` cache, or ``None`` to
+    disable caching (nothing is written; every job rebuilds from the feature files).
+
+    Resolution order:
+      1. ``SPARTA_TS_CACHE=off`` (also ``0``/``none``/``false``) -> ``None``;
+      2. ``SPARTA_TS_CACHE=<dir>`` -> ``<dir>/<tag>``;
+      3. ``$VSC_SCRATCH`` set (VSC clusters) -> ``$VSC_SCRATCH/SPaRTA/timeseries/<tag>``
+         — the cache is transient shared state between the per-model Slurm jobs of a
+         combo, so it belongs on the large scratch filesystem, not the quota'd
+         data/home volume the repo lives on;
+      4. otherwise the historical ``results/timeseries/<tag>``.
+    """
+    raw = os.environ.get("SPARTA_TS_CACHE", "").strip()
+    if raw.lower() in ("off", "0", "none", "false"):
+        return None
+    if raw:
+        return os.path.join(raw, tag)
+    scratch = os.environ.get("VSC_SCRATCH", "").strip()
+    if scratch:
+        return os.path.join(scratch, "SPaRTA", "timeseries", tag)
+    return os.path.join("results/timeseries", tag)
+
+
 def suggest_param(trial, name: str, spec: Any):
     """
     Map a YAML search-space entry to an Optuna ``trial.suggest_*`` call.
