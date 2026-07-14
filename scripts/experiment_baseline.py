@@ -20,7 +20,7 @@ from sklearn.metrics import average_precision_score
 from src.utils.setup import (load_config, resolve_dataset, resolve_timing,
                              resolve_sequence, run_tag, suggest_param,
                              resolve_storage, make_pruner, remaining_trials,
-                             walltime_budget, resolve_ts_cache_dir)
+                             walltime_budget, resolve_ts_cache_dir, cleanup_storage)
 from src.data.sequence_data import build_sequence_dataset, temporal_split
 from src.methods import evaluation
 
@@ -348,3 +348,10 @@ if __name__ == "__main__":
     #     f"Baselines ({task}, {tag}) — {type_dataset} (n={len(y_test)}, {int(y_test.sum())} positive)",
     #     save_path=f"results/experiments/{stem}_baselines{model_suffix}.png")
     print(f"Wrote metrics -> {metrics_path}")
+
+    # All outputs are on disk, so the resumable SQLites are no longer needed; each is kept
+    # only when the walltime timeout stopped its study short of its budget (a resubmit tops up).
+    if "XGBoost" in selected:
+        cleanup_storage(resolve_storage(bl_cfg, study_name=xgb_study), xgb_study, n_trials)
+    if "NeuralNetwork" in selected:
+        cleanup_storage(resolve_storage(bl_cfg, study_name=nn_study), nn_study, nn_n_trials)

@@ -25,7 +25,7 @@ from src.methods.models import CNN
 from src.methods import evaluation
 from src.utils.setup import (load_config, resolve_dataset, suggest_param,
                              resolve_storage, make_pruner, remaining_trials,
-                             walltime_budget)
+                             walltime_budget, cleanup_storage)
 from src.utils.feature_io import load_table
 
 SEED = 1997
@@ -204,3 +204,7 @@ if __name__ == "__main__":
         f"CNN — {type_dataset} (n={len(y_test_np)}, {int(y_test_np.sum())} positive)",
         save_path=f"results/experiments/{type_dataset}_CNN.png")
     print(f"Wrote metrics -> {metrics_path}")
+
+    # All outputs are on disk, so the resumable SQLite is no longer needed; kept only when
+    # the walltime timeout stopped the study short of n_trials (a resubmit tops it up).
+    cleanup_storage(resolve_storage(cnn_cfg, study_name=study_name), study_name, cnn_cfg['n_trials'])

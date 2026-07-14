@@ -237,3 +237,34 @@ def remaining_trials(study, n_trials):
                 optuna.trial.TrialState.FAIL)
     done = sum(1 for t in study.trials if t.state in finished)
     return max(0, n_trials - done)
+
+
+def cleanup_storage(storage, study_name, n_trials):
+    """Delete a study's per-study SQLite file (see ``resolve_storage``) once it is no
+    longer needed — i.e. the study has finished its full ``n_trials`` budget.
+
+    Call this only AFTER the run's outputs (best-params/model/metrics) are on disk: the
+    file is what lets a resubmitted job skip straight past tuning, so deleting it earlier
+    turns a crash during the final refit into a full re-tune. A study stopped short of
+    ``n_trials`` (walltime_budget timeout) keeps its file so the resubmit can top up.
+    No-op for in-memory studies (``storage`` unset) and non-SQLite URLs.
+    """
+    prefix = "sqlite:///"
+    if not storage or not str(storage).startswith(prefix):
+        return
+    path = storage[len(prefix):]
+    # Existence check BEFORE load_study: loading a missing SQLite path creates an empty db
+    # file as a side effect, which a cleanup helper of all things should not do.
+    if not os.path.exists(path):
+        return
+    import optuna
+    try:
+        study = optuna.load_study(study_name=study_name, storage=storage)
+    except Exception:
+        return  # unreadable / study not in this file — leave it alone
+    if remaining_trials(study, n_trials) > 0:
+        return
+    try:
+        os.remove(path)
+    except OSError:
+        pass
