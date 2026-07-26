@@ -107,6 +107,24 @@ Tips: append `%8` to a training script's `--array` (e.g. `0-23%8`) to cap concur
 your GPU/CPU allocation is limited. Raise `--time=` or shrink `timeseries.n_trials` in
 `config/methods/config.yaml` if the 24 h LSTM wall time is tight.
 
+## Failed / timed-out tasks: what to resubmit
+
+Don't resubmit a whole training array: tasks that completed deleted their Optuna SQLite
+(`cleanup_storage`), so rerunning them retunes from scratch instead of resuming. Instead run
+
+```bash
+bash slurm/missing_runs.sh            # all datasets; or: bash slurm/missing_runs.sh AMLSim
+```
+
+from the repo root (on the cluster — it audits `results/` on disk, not Slurm exit codes).
+For every model it lists, per dataset, the array indices that are **missing** (task crashed
+or never ran — no `Model:` block in any `results/experiments/` dump) or need a **top-up**
+(metrics written, but the study's `results/tuning/*.db` survived, i.e. the walltime timeout
+stopped it short of `n_trials`), and prints the exact `sbatch --array=... <script> <Dataset>
+<model>` command for each gap. Resubmitted tasks resume their studies from the per-study
+SQLite and rewrite the outputs. To find out *why* a task died, check its
+`slurm/logs/*_<jobid>_<idx>.err` or `sacct -M wice -j <jobid> --format=JobID%20,State,ExitCode`.
+
 ## Limited disk: stage one dataset at a time
 
 `extract_features_sequential.slurm` is the static extraction with a symlink stage-in/out

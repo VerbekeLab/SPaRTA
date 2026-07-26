@@ -68,7 +68,8 @@ def train_model(model, train_tensors, val_tensors, device, loss="bce", lr=1e-3,
     explicit temporal val band (no random carve); shuffling seeded with 1997. weight_decay is
     tuned (defaults to the old fixed 1e-5). When `trial` is given (Optuna tuning), the
     best-so-far val AUC-PR is reported each epoch and the trial is pruned if it tracks below
-    the running median of completed trials."""
+    the running median of completed trials. If training diverges (non-finite val predictions),
+    it stops and returns the best-so-far AP floored at 0.0 rather than raising."""
     Xa, ma, ya = train_tensors
     Xv, mv, yv = val_tensors
     Xa, ma, ya = Xa.to(device), ma.to(device), ya.to(device)
@@ -91,6 +92,12 @@ def train_model(model, train_tensors, val_tensors, device, loss="bce", lr=1e-3,
             criterion(model(xb, mb), yb).backward()
             opt.step()
         pv = predict(model, Xv, mv, device)
+        # Diverged (NaN/inf weights, e.g. high lr + pos-weighted bce): unrecoverable, so stop
+        # here — the trial COMPLETES with best-so-far (floored at 0.0) instead of crashing the
+        # study on average_precision_score, and best_state keeps the last pre-divergence weights.
+        if not np.isfinite(pv).all():
+            best_ap = max(best_ap, 0.0)
+            break
         ap = average_precision_score(yv_np, pv) if yv_np.sum() else 0.0
         if ap > best_ap:
             best_ap, wait = ap, 0
