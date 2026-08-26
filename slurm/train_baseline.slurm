@@ -39,11 +39,15 @@
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=8
-# Sized for AMLWorld's largest cells: forecast K=17 keeps the ~37 GB window tensor plus the
-# flattened 2D band arrays (same size again) plus XGBoost's internal DMatrix in memory at
-# once. Without --mem the per-core default share OOM-kills the task during data prep.
-# Override smaller at submit time for AMLSim/Tide if queueing matters.
-#SBATCH --mem=128G
+# Sized from the COMPACT window form the experiments now use (build_sequence_windows +
+# per-batch gather): the dense [N, K, 90] tensor that used to drive this request is never
+# materialised. AMLWorld's worst cell is forecast K=17 —
+#   the three 2D band arrays total 29.7 GB, plus XGBoost's quantized hist DMatrix (~1 byte
+#   per feature value, 3.8M x 1530 = 5.8 GB). ~36 GB peak, against the ~90 GB this used to
+#   need when the dense window tensor was built first and each band copied out of it.
+#   IsolationForest adds nothing (max_samples='auto' = 256 rows). Check the first cell with
+#   `slurm_jobinfo <jobid>` and tighten further if you want.
+#SBATCH --mem=64G
 
 #SBATCH --clusters=wice
 #SBATCH --partition=batch

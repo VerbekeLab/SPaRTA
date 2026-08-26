@@ -20,12 +20,16 @@
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=8
-# Sized for AMLWorld's largest cells (K=17 window tensor ~37 GB float32, ~2x peak while
-# slicing the 2D band arrays); without --mem the per-core default share OOM-kills the task
-# during data prep. Override smaller at submit time for AMLSim/Tide if queueing matters.
-# 123G is the most a 1-GPU job may request on wice's gpu_a100 (126000 MiB/GPU cap —
-# sbatch rejects anything larger).
-#SBATCH --mem=123G
+# Sized from the COMPACT window form the experiments now use (build_sequence_windows +
+# per-batch gather): the dense [N, K, 90] tensor that used to drive this request is never
+# materialised. AMLWorld's worst cell is forecast K=17 —
+#   the three 2D band arrays total 3.8M/0.87M/0.20M rows x 1530 x 4B = 29.7 GB (XGBoost and
+#   an MLP both need a REAL dense 2D matrix, so for forecast that block must exist once), and
+#   StandardScaler.transform copies the band it is scaling -> +23.2 GB transient on the train
+#   band. ~53 GB peak. The nowcast cells now gather ONE column instead of building all K and
+#   discarding 16/17 of it, so they need a small fraction of this. Check the first cell with
+#   `slurm_jobinfo <jobid>` and tighten further if you want.
+#SBATCH --mem=72G
 #SBATCH --gpus-per-node=1
 
 #SBATCH --clusters=wice
@@ -54,6 +58,13 @@ export MKL_NUM_THREADS=$SLURM_CPUS_PER_TASK
 source slurm/sweep_common.sh
 resolve_dataset_arg "${1:-}"
 decode_train "$SLURM_ARRAY_TASK_ID"
+
+# This job holds a GPU, so it must NOT fall back to re-assembling windows from the feature
+# files (~40 min of single-threaded pandas with the A100 idle). Require the Stage-1.5 store:
+# a missing one fails the job in seconds instead. Build it with
+#   sbatch slurm/build_windows.slurm <Dataset>
+# and chain with --dependency=afterok. Unset this only to deliberately allow the slow path.
+export SPARTA_REQUIRE_WINDOWS=1
 
 export SPARTA_BASELINE_MODELS="nn"
 echo "[$(date)] baselines (nn): dataset=$SPARTA_DATASET tag=$SPARTA_RUN_TAG"\

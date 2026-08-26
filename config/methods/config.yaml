@@ -97,11 +97,13 @@ defaults:
       dropout:      {low: 0.0, high: 0.5, step: 0.1, type: float}
       lr:           [0.0001, 0.001, 0.01]
       weight_decay: {low: 1.0e-6, high: 1.0e-3, type: float, log: true}
-      # Same overhead-bound issue as the MLP baseline (see nn_search_space.batch_size below):
-      # training sets run to the millions of rows, so batch_size=16-64 means tens of thousands
-      # of mini-batches/epoch dominated by per-batch Python/kernel-launch overhead rather than
-      # GPU compute — the GPU sits mostly idle. Bigger batches are what actually uses it.
-      batch_size:   [256, 512, 1024]
+      # Same reasoning as nn_search_space.batch_size below. Now that a batch is one gather
+      # instead of one DataLoader row-fetch per sample (see train_model), per-batch cost no
+      # longer grows with batch_size, so a bigger batch genuinely cuts the step count and gives
+      # the GPU real work per launch — hence the order-of-magnitude move up from [256, 512, 1024].
+      # Changing these choices invalidates existing studies (Optuna rejects a changed
+      # CategoricalDistribution): delete results/tuning/LSTM_*.db and Transformer_*.db first.
+      batch_size:   [1024, 4096, 16384]
       # Halved from 300: patience/pruning already end most trials well before the old ceiling,
       # so this mainly stops the rare non-early-stopped trial from running needlessly long.
       epochs:       {low: 50, high: 150, step: 50}
@@ -149,10 +151,14 @@ defaults:
       lr:           [0.0001, 0.001, 0.01]
       weight_decay: {low: 1.0e-6, high: 1.0e-3, type: float, log: true}
       # Training sets here run to the millions of rows (per-anchor node counts x train
-      # anchors); at batch_size=32 that's tens of thousands of mini-batches/epoch, so wall
-      # time is dominated by per-batch Python/kernel-launch overhead, not FLOPs. Bigger
-      # batches cut the step count directly and are what the GPU job actually benefits from.
-      batch_size:   [256, 512, 1024]
+      # anchors), so the number of optimiser steps per epoch is what sets wall time. Raising
+      # this grid was previously useless: DataLoader(TensorDataset(...)) cost a few kernel
+      # launches PER SAMPLE, so a 4x bigger batch bought 4x the per-batch overhead and the GPU
+      # stayed at 3-4%. run_nn_baseline now slices a per-epoch permutation (one gather per
+      # batch), so the step count really does drop with batch_size. Changing these choices
+      # invalidates existing studies (Optuna rejects a changed CategoricalDistribution):
+      # delete results/tuning/baseline_nn_*.db before resubmitting.
+      batch_size:   [1024, 4096, 16384]
       # Halved from 300 (same reasoning as timeseries.search_space.epochs): early stopping
       # usually ends trials well before the old ceiling, which mostly capped worst-case length.
       epochs:       {low: 50, high: 150, step: 50}   # max_epochs cap

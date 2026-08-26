@@ -32,13 +32,16 @@
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=8
-# Sized for AMLWorld's largest cells: the K=17 window tensor is ~37 GB float32 and peaks
-# at ~2x during scaling/band-tensor construction. Without an explicit --mem the job gets
-# only the small per-core default share and is OOM-killed before the first trial. AMLSim
-# and Tide need far less — override at submit time (sbatch --mem=32G ...) if queueing matters.
-# 123G is the most a 1-GPU job may request on wice's gpu_a100 (126000 MiB/GPU cap —
-# sbatch rejects anything larger).
-#SBATCH --mem=123G
+# Sized from the COMPACT window form the experiments now use (build_sequence_windows +
+# per-batch gather): the dense [N, K, 90] tensor that used to drive this request is never
+# materialised. AMLWorld's worst cell is forecast K=17 —
+#   values 8.6M rows x 90 x 4B = 3.1 GB, its scaled copy another 3.1 GB, the train-cell
+#   gather in fit_scaler_compact ~2.5 GB, idx 4.9M x 17 x 4B = 0.3 GB -> under 10 GB, vs the
+#   ~74 GB (2 x 37) this used to peak at. 32G leaves generous headroom for pandas/torch
+#   overhead. GPU-side residency drops the same way: one shared values_t (~3 GB) instead of
+#   the ~26 GB of dense per-band window tensors. Check the first cell with
+#   `slurm_jobinfo <jobid>` and tighten further if you want.
+#SBATCH --mem=32G
 #SBATCH --gpus-per-node=1
 
 #SBATCH --clusters=wice
@@ -72,6 +75,13 @@ decode_train "$SLURM_ARRAY_TASK_ID"
 
 # Which architectures this task runs: 2nd positional arg, else a pre-set SPARTA_SEQ_MODELS,
 # else both (the original single-job behaviour). See the header for the fan-out mode.
+# This job holds a GPU, so it must NOT fall back to re-assembling windows from the feature
+# files (~40 min of single-threaded pandas with the A100 idle). Require the Stage-1.5 store:
+# a missing one fails the job in seconds instead. Build it with
+#   sbatch slurm/build_windows.slurm <Dataset>
+# and chain with --dependency=afterok. Unset this only to deliberately allow the slow path.
+export SPARTA_REQUIRE_WINDOWS=1
+
 export SPARTA_SEQ_MODELS="${2:-${SPARTA_SEQ_MODELS:-all}}"
 echo "[$(date)] LSTM+Transformer+Optuna ($SPARTA_SEQ_MODELS): dataset=$SPARTA_DATASET tag=$SPARTA_RUN_TAG"\
      "K=$SPARTA_K task=$SPARTA_TASK on $(nvidia-smi -L 2>/dev/null | head -1)"

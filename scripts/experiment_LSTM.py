@@ -12,7 +12,6 @@ sys.path.append(DIR)
 
 import numpy as np
 import torch
-from torch.utils.data import TensorDataset, DataLoader
 
 import json
 import optuna
@@ -21,9 +20,10 @@ from sklearn.metrics import average_precision_score
 from src.utils.setup import (load_config, resolve_dataset, resolve_timing,
                              resolve_sequence, run_tag, suggest_param,
                              resolve_storage, make_pruner, remaining_trials,
-                             walltime_budget, resolve_ts_cache_dir, cleanup_storage)
-from src.data.sequence_data import (build_sequence_dataset, temporal_split,
-                                     fit_scaler, apply_scaler)
+                             walltime_budget, resolve_ts_cache_dir, cleanup_storage,
+                             resolve_window_store_dir, require_prebuilt_windows)
+from src.data.sequence_data import (build_sequence_windows, temporal_split,
+                                     fit_scaler_compact, apply_scaler_compact)
 from src.methods.models import LSTMClassifier, TransformerClassifier
 from src.methods.losses import make_loss
 from src.methods import evaluation
@@ -45,39 +45,61 @@ def make_model(arch, params, n_features):
     raise ValueError(f"unknown arch: {arch!r}")
 
 
-def predict(model, X_t, mask_t, device, batch_size=4096):
-    """Return P(positive) for the given (already-scaled) tensors as a numpy array.
-    Chunked over batch_size so the full-population test/val band can't OOM on GPU/MPS
-    (the notebook ran a ~150-node cohort in one pass; real datasets are far larger)."""
+def gather_windows(values_t, idx_b):
+    """([B, K, F] windows, [B, K] mask) gathered from the shared compact block.
+
+    This is the device-side twin of sequence_data._expand_windows, done PER BATCH instead of
+    once for the whole population: the dense window tensor is ~K times `values` (2.6 GB -> 18 GB
+    at AMLWorld K=7, ~31 GB at K=17), so materialising it was what set this job's memory
+    request. Absent steps (idx == -1) are zeroed, exactly as _expand_windows does."""
+    m = idx_b >= 0
+    x = values_t[idx_b.clamp(min=0)]
+    x[~m] = 0.0
+    return x, m
+
+
+def predict(model, values_t, idx_t, batch_size=4096):
+    """Return P(positive) for the samples in `idx_t` as a numpy array. Chunked over
+    batch_size so the full-population test/val band can't OOM on GPU/MPS: only batch_size
+    windows exist at a time, on top of the one shared `values_t` block."""
     model.eval()
     probs = []
     with torch.no_grad():
-        for i in range(0, len(X_t), batch_size):
-            logits = model(X_t[i:i + batch_size].to(device), mask_t[i:i + batch_size].to(device))
-            probs.append(torch.sigmoid(logits).cpu().numpy())
+        for i in range(0, len(idx_t), batch_size):
+            x, m = gather_windows(values_t, idx_t[i:i + batch_size])
+            probs.append(torch.sigmoid(model(x, m)).cpu().numpy())
     return np.concatenate(probs) if probs else np.zeros(0, dtype=np.float32)
 
 
-def train_model(model, train_tensors, val_tensors, device, loss="bce", lr=1e-3,
+def train_model(model, values_t, train_bands, val_bands, device, loss="bce", lr=1e-3,
                 batch_size=16, max_epochs=300, patience=30, alpha=0.75, gamma=2.0,
                 pos_weight=None, weight_decay=1e-5, trial=None):
-    """Mini-batch Adam, early-stop on the GIVEN val tensors by AUC-PR, restore best.
+    """Mini-batch Adam, early-stop on the GIVEN val band by AUC-PR, restore best.
 
-    train_tensors = (X[N,K,F] f32, mask[N,K] bool, y[N] f32); val_tensors = (Xv,mv,yv).
+    values_t     [M, F] float32, already on `device` — the SHARED scaled feature block. One
+                 allocation for the whole job; windows are gathered from it per batch.
+    train_bands  (idx [n, K] int32, y [n] f32), both already on `device`; val_bands likewise.
+                 `mask` is idx >= 0, so no separate mask tensor is stored or uploaded.
     Returns (best_val_aucpr, best_state). Adapts the notebook's train_eval to the
     explicit temporal val band (no random carve); shuffling seeded with 1997. weight_decay is
     tuned (defaults to the old fixed 1e-5). When `trial` is given (Optuna tuning), the
     best-so-far val AUC-PR is reported each epoch and the trial is pruned if it tracks below
     the running median of completed trials. If training diverges (non-finite val predictions),
-    it stops and returns the best-so-far AP floored at 0.0 rather than raising."""
-    Xa, ma, ya = train_tensors
-    Xv, mv, yv = val_tensors
-    Xa, ma, ya = Xa.to(device), ma.to(device), ya.to(device)
-    Xv, mv = Xv.to(device), mv.to(device)
+    it stops and returns the best-so-far AP floored at 0.0 rather than raising.
+
+    Callers upload once, so trials no longer re-copy their bands to the device each time."""
+    idx_a, ya = train_bands
+    idx_v, yv = val_bands
     yv_np = yv.cpu().numpy()
 
-    loader = DataLoader(TensorDataset(Xa, ma, ya), batch_size=batch_size, shuffle=True,
-                        generator=torch.Generator().manual_seed(SEED))
+    # Mini-batches are sliced out of a per-epoch permutation, not drawn from a
+    # DataLoader(TensorDataset(...)) — see the same change in scripts/experiment_baseline.py.
+    # A DataLoader fetches one row at a time and collates, costing a few kernel launches per
+    # SAMPLE; at these window counts that overhead, not the recurrent/attention math, set the
+    # epoch time and left the GPU mostly idle. This changes the shuffle stream, so
+    # sequence-model numbers shift within run-to-run noise.
+    n_train = idx_a.shape[0]
+    gen = torch.Generator(device=device).manual_seed(SEED)
 
     model.to(device)
     pw = pos_weight.to(device) if pos_weight is not None else None
@@ -87,11 +109,14 @@ def train_model(model, train_tensors, val_tensors, device, loss="bce", lr=1e-3,
     best_ap, best_state, wait = -1.0, None, 0
     for epoch in range(max_epochs):
         model.train()
-        for xb, mb, yb in loader:
+        perm = torch.randperm(n_train, device=device, generator=gen)
+        for i in range(0, n_train, batch_size):
+            b = perm[i:i + batch_size]
+            xb, mb = gather_windows(values_t, idx_a[b])
             opt.zero_grad()
-            criterion(model(xb, mb), yb).backward()
+            criterion(model(xb, mb), ya[b]).backward()
             opt.step()
-        pv = predict(model, Xv, mv, device)
+        pv = predict(model, values_t, idx_v)
         # Diverged (NaN/inf weights, e.g. high lr + pos-weighted bce): unrecoverable, so stop
         # here — the trial COMPLETES with best-so-far (floored at 0.0) instead of crashing the
         # study on average_precision_score, and best_state keeps the last pre-divergence weights.
@@ -118,7 +143,7 @@ def train_model(model, train_tensors, val_tensors, device, loss="bce", lr=1e-3,
 
 
 def _tune_arch(arch, study_name, storage, n_trials, search_space, n_features,
-               train_tensors, val_tensors, device, pos_weight, patience, pruner=None):
+               values_t, train_bands, val_bands, device, pos_weight, patience, pruner=None):
     """One Optuna study for an architecture: maximise val-band AUC-PR via train_model.
     Returns (best_params, best_value). MedianPruner (via `pruner`) stops trials tracking below
     the median early; per-study `storage` makes it resumable and n_trials tops up on resume."""
@@ -131,7 +156,7 @@ def _tune_arch(arch, study_name, storage, n_trials, search_space, n_features,
         # 'epochs' is the max_epochs upper bound; early stopping (patience) / pruning usually
         # end training sooner, so it mostly caps very-long runs rather than fixing length.
         best_ap, _ = train_model(
-            model, train_tensors, val_tensors, device,
+            model, values_t, train_bands, val_bands, device,
             loss=params["loss"], lr=params["lr"], batch_size=params["batch_size"],
             max_epochs=params["epochs"], patience=patience, alpha=params["alpha"], gamma=params["gamma"],
             weight_decay=params.get("weight_decay", 1e-5), pos_weight=pos_weight, trial=trial)
@@ -220,45 +245,59 @@ if __name__ == "__main__":
     # snapshots and writes its own .npz (the tag encodes width/days_echo — the field the
     # old cache key omitted — so a same-T combo can no longer hit a stale cache).
     # resolve_ts_cache_dir sends the cache to $VSC_SCRATCH on the cluster, or disables
-    # it under SPARTA_TS_CACHE=off.
-    X, mask, y, anchors, nodes = build_sequence_dataset(
+    # it under SPARTA_TS_CACHE=off. store_dir is the Stage-1.5 prebuilt window store
+    # (slurm/build_windows.slurm), tried before both of those — it is why this GPU job can
+    # start training seconds after allocation instead of re-assembling windows for ~40 min.
+    values, idx, y, anchors, nodes = build_sequence_windows(
         dataset, type_dataset, echo, K, task,
         features_dir=os.path.join(ts_cfg.get("data_directory", "results/features"), tag),
         cache_dir=resolve_ts_cache_dir(tag),
+        store_dir=resolve_window_store_dir(tag),
+        require_prebuilt=require_prebuilt_windows(),
         time_step=net_cfg["time_step"], time_width=net_cfg["time_width"],
         time_type=net_cfg["time_type"])
 
-    # --- Temporal split + mask-aware scaler (fit on TRAIN only).
+    # --- Temporal split + mask-aware scaler (fit on TRAIN only). Both work on the COMPACT
+    # (values, idx) form: the dense [N, K, F] window tensor is never built, on host or device.
+    # It is ~K times `values`, and the old flow held the raw copy, the scaled copy AND the
+    # per-band tensor copies at once (~3x one array) — that product, not the model, is what
+    # set this job's --mem and its GPU residency.
     train_idx, val_idx, test_idx = temporal_split(
         anchors, y, n_test_anchors=n_test_anchors, n_val_anchors=n_val_anchors,
         dataset_label=type_dataset)
-    mu, sd = fit_scaler(X, mask, nodes, anchors, K, task, train_idx)
-    Xs = apply_scaler(X, mask, mu, sd)
-    X_shape = X.shape
-    n_features = X_shape[-1]
-    # X and Xs are each tens of GB at AMLWorld scale, and everything downstream reads only
-    # the scaled copy / the band tensors — free each as soon as its last consumer is done,
-    # or the peak (raw + scaled + tensors ~= 3x one array) blows the job's memory request.
-    del X
+    mu, sd = fit_scaler_compact(values, idx, train_idx)
+    values = apply_scaler_compact(values, mu, sd)
+    n_features = values.shape[1]
 
     # Drop all-masked rows per band (forecast no-history rows; nowcast anchor is
-    # always valid, so this is a no-op there).
-    def _band(idx):
-        return idx[mask[idx].any(1)]
+    # always valid, so this is a no-op there). mask is just idx >= 0 here.
+    def _band(band):
+        return band[(idx[band] >= 0).any(1)]
     train_idx, val_idx, test_idx = _band(train_idx), _band(val_idx), _band(test_idx)
 
-    to_t = lambda a, dt=torch.float32: torch.as_tensor(a, dtype=dt)
-    train_tensors = (to_t(Xs[train_idx]), to_t(mask[train_idx], torch.bool), to_t(y[train_idx]))
-    val_tensors = (to_t(Xs[val_idx]), to_t(mask[val_idx], torch.bool), to_t(y[val_idx]))
-    test_tensors = (to_t(Xs[test_idx]), to_t(mask[test_idx], torch.bool), to_t(y[test_idx]))
+    # ONE shared feature block on the device, plus a small int32 index per band (torch indexes
+    # fine with int32, so the index stays half the size of an int64 one). Windows are gathered
+    # from this per batch by gather_windows.
+    values_t = torch.as_tensor(values, dtype=torch.float32).to(device)
+    idx_shape = idx.shape
+    n_values = len(values)
+    del values
+    to_idx = lambda b: torch.as_tensor(idx[b], dtype=torch.int32).to(device)
+    to_y = lambda b: torch.as_tensor(y[b], dtype=torch.float32).to(device)
+    train_bands = (to_idx(train_idx), to_y(train_idx))
+    val_bands = (to_idx(val_idx), to_y(val_idx))
+    test_bands = (to_idx(test_idx), to_y(test_idx))
     y_test = y[test_idx]
-    del Xs    # the band tensors above are copies; the full scaled array is no longer needed
+    del idx
 
     # Empirical pos_weight (neg/pos) on the train band — used for the bce loss.
     ytr = y[train_idx]
-    pos_weight = to_t([(ytr == 0).sum() / max(1, (ytr == 1).sum())])
+    pos_weight = torch.as_tensor([(ytr == 0).sum() / max(1, (ytr == 1).sum())],
+                                 dtype=torch.float32)
 
-    print(f"X{X_shape} | train {len(train_idx)} val {len(val_idx)} test {len(test_idx)} "
+    print(f"values[{n_values:,}, {n_features}] + idx{tuple(idx_shape)} on {device} "
+          f"(dense windows would be {idx_shape[0] * idx_shape[1] * n_features * 4 / 1e9:.1f} GB) "
+          f"| train {len(train_idx)} val {len(val_idx)} test {len(test_idx)} "
           f"| task={task} K={K} echo={echo}")
 
     os.makedirs("results/tuning", exist_ok=True)
@@ -277,18 +316,18 @@ if __name__ == "__main__":
     for arch, study_name, label in archs:
         best_params, best_value = _tune_arch(
             arch, study_name, resolve_storage(ts_cfg, study_name=study_name), n_trials,
-            search_space, n_features, train_tensors, val_tensors, device, pos_weight, patience,
-            pruner=make_pruner(ts_cfg))
+            search_space, n_features, values_t, train_bands, val_bands, device, pos_weight,
+            patience, pruner=make_pruner(ts_cfg))
         best_params_all[label] = {"best_params": best_params, "best_value_AUCPR": best_value}
 
         torch.manual_seed(SEED)
         model = make_model(arch, best_params, n_features)
-        train_model(model, train_tensors, val_tensors, device,
+        train_model(model, values_t, train_bands, val_bands, device,
                     loss=best_params["loss"], lr=best_params["lr"],
                     batch_size=best_params["batch_size"], max_epochs=best_params["epochs"],
                     patience=patience, alpha=best_params["alpha"], gamma=best_params["gamma"],
                     weight_decay=best_params.get("weight_decay", 1e-5), pos_weight=pos_weight)
-        scores[label] = predict(model, test_tensors[0], test_tensors[1], device)
+        scores[label] = predict(model, values_t, test_bands[0])
 
         torch.save(
             {"state_dict": model.state_dict(), "mu": mu, "sd": sd,

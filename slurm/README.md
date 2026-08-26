@@ -50,6 +50,7 @@ update each script's `--array` range to match (the dynamic scripts source this f
 grid itself stays in lockstep — only the `#SBATCH --array=` line is hand-kept):
 
 - `extract_features_dynamic.slurm`: `0-3` (timing combos)
+- `build_windows.slurm`: `0-3` (timing combos — K/task are free re-slices of one store)
 - `train_lstm.slurm` / `train_baseline.slurm` / `train_baseline_nn.slurm`: `0-23` (timing × K × task)
 - `extract_features.slurm`, `train_features.slurm`, `train_cnn.slurm`: no array (one job = one dataset)
 
@@ -67,6 +68,16 @@ grid itself stays in lockstep — only the `#SBATCH --array=` line is hand-kept)
   sequentially by default; pass `lstm` or `transformer` as a 2nd arg (or set
   `SPARTA_SEQ_MODELS`) to fan them into separate concurrent tasks instead — see that
   script's header.
+- **Stage 1.5, `build_windows.slurm`** sits between them. The stacked snapshot block a
+  window build needs depends on the **tag alone**, not on K or the task, so it is built once
+  per tag (4 CPU tasks) into a prebuilt *window store* (`src/data/window_store.py`); each of
+  that tag's 6 (K × task) training cells then derives its own windows from it by index
+  arithmetic in seconds. Without it every cell re-read the feature files and re-assembled the
+  block itself — ~40 min of single-threaded pandas, **two of the six on a GPU node**. The GPU
+  scripts therefore set `SPARTA_REQUIRE_WINDOWS=1`: a missing store fails them in seconds
+  instead of quietly paying that cost with an A100 idle. Store location follows
+  `resolve_window_store_dir` (`$VSC_SCRATCH/SPaRTA/windows/<tag>` on VSC);
+  `SPARTA_WINDOW_STORE=off` disables it and restores the old in-job build.
 
 ## Submission order (per dataset)
 
@@ -78,14 +89,18 @@ DS=AMLWorld           # then repeat the block with AMLSim, Tide
 EXTRACT_STATIC=$(sbatch --parsable slurm/extract_features.slurm $DS)          # 1 task  (static)
 EXTRACT_DYN=$(sbatch --parsable slurm/extract_features_dynamic.slurm $DS)     # 4 tasks (dynamic sweep)
 
+# 1.5 Window store — one per tag, on CPU. Every dynamic training cell reads this instead of
+#     re-assembling windows from the feature files (~40 min each, two of them on a GPU).
+WINDOWS=$(sbatch --parsable --dependency=afterok:$EXTRACT_DYN slurm/build_windows.slurm $DS)  # 4 tasks (CPU)
+
 # 2. Training — each depends on ITS dataset's extraction (afterok = only if extraction ok).
 #    Static models depend on the static extraction:
 sbatch --dependency=afterok:$EXTRACT_STATIC slurm/train_features.slurm $DS    # 1 task   (CPU)
 sbatch --dependency=afterok:$EXTRACT_STATIC slurm/train_cnn.slurm $DS         # 1 task   (GPU)
-#    Dynamic models depend on the dynamic extraction:
-LSTM=$(sbatch --parsable --dependency=afterok:$EXTRACT_DYN slurm/train_lstm.slurm $DS)        # 24 (GPU)
-BASE=$(sbatch --parsable --dependency=afterok:$EXTRACT_DYN slurm/train_baseline.slurm $DS)    # 24 (CPU: XGBoost + IsolationForest)
-BASE_NN=$(sbatch --parsable --dependency=afterok:$EXTRACT_DYN slurm/train_baseline_nn.slurm $DS) # 24 (GPU: MLP)
+#    Dynamic models depend on the WINDOW STORE (which already depends on the extraction):
+LSTM=$(sbatch --parsable --dependency=afterok:$WINDOWS slurm/train_lstm.slurm $DS)        # 24 (GPU)
+BASE=$(sbatch --parsable --dependency=afterok:$WINDOWS slurm/train_baseline.slurm $DS)    # 24 (CPU: XGBoost + IsolationForest)
+BASE_NN=$(sbatch --parsable --dependency=afterok:$WINDOWS slurm/train_baseline_nn.slurm $DS) # 24 (GPU: MLP)
 ```
 
 Once the training jobs of **all datasets you care about** have finished, aggregate

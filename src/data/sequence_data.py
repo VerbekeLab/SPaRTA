@@ -83,17 +83,30 @@ def _load_snapshot(i, type_dataset, suffix, features_dir):
     return merged.set_index("node")
 
 
-def build_sequence_dataset(dataset, type_dataset, echo, K, task,
+def build_sequence_windows(dataset, type_dataset, echo, K, task,
                            features_dir="results/features", cache_dir="results/timeseries",
                            use_cache=True, transactions=None,
-                           time_step=1, time_width=1, time_type="days"):
-    """Build the (X, mask, y, anchors, nodes) windowed sequence dataset.
+                           time_step=1, time_width=1, time_type="days",
+                           store_dir=None, require_prebuilt=False):
+    """Windowed sequence dataset in its COMPACT form — the one callers should prefer.
 
-    X      float32 [N, K, F]  (F=90; padded/absent steps = 0)
-    mask   bool    [N, K]     (True where the node is present at that step)
-    y      float32 [N]        (is_laundering of the node at its anchor snapshot)
-    anchors int    [N]        (anchor snapshot index per sample)
-    nodes  object  [N]        (node id per sample)
+    values  float32 [M, F]  each present (snapshot, node) feature row, ONCE (F=90)
+    idx     int32   [N, K]  idx[sample, step] -> row of `values`; -1 = node absent that step
+    y       float32 [N]     is_laundering of the node at its anchor snapshot
+    anchors int     [N]     anchor snapshot index per sample
+    nodes   object  [N]     node id per sample
+
+    `mask` is just ``idx >= 0``, and the dense window tensor is ``values[idx]`` with the -1
+    positions zeroed. Adjacent anchors share K-1 snapshots, so that dense form is ~K times
+    LARGER than `values` (2.6 GB -> 18 GB at AMLWorld K=7, ~31 GB at K=17) — which is why the
+    experiments keep this form and gather per batch instead. Use build_sequence_dataset() only
+    when a consumer genuinely needs the whole dense tensor at once.
+
+    Sources, in order: the prebuilt per-tag window store (`store_dir`, seconds — see
+    src/data/window_store.py), this combo's .npz cache, then a full re-assembly from the
+    per-snapshot feature files (~40 min at AMLWorld scale). `require_prebuilt` turns the last
+    two into a hard failure, which is what a GPU job wants: paying that re-assembly with an
+    accelerator allocated and idle is the failure mode Stage 1.5 exists to remove.
 
     A sample = (node, anchor): for each valid anchor a (nowcast a in [K-1 .. T-1],
     forecast a in [K .. T-1]) and each node present at snapshot a, emit one K-step
@@ -103,6 +116,26 @@ def build_sequence_dataset(dataset, type_dataset, echo, K, task,
         raise ValueError(f"task must be 'nowcast' or 'forecast', got {task!r}")
 
     suffix = "_echo" if echo else ""
+
+    # --- Fast path: the prebuilt per-tag store. Checked BEFORE the transaction load below,
+    # because T comes from its meta.json — so a job with a store never parses the raw
+    # transaction file (hundreds of MB) merely to count snapshots. Imported here rather than at
+    # module scope: window_store reads _load_snapshot/_snapshot_index from THIS module.
+    from src.data import window_store
+
+    if store_dir is not None and window_store.store_exists(store_dir, type_dataset, suffix):
+        # mmap=False: callers gather from `values` many times (once per batch), so it belongs
+        # in RAM rather than being paged out of a memmap on every touch.
+        store = window_store.load_window_store(store_dir, type_dataset, suffix, mmap=False)
+        return window_store.windows_from_store(store, K, task)
+
+    if require_prebuilt:
+        raise SystemExit(
+            f"No prebuilt window store for {type_dataset}{suffix} under {store_dir!r}, and "
+            f"require_prebuilt is set (SPARTA_REQUIRE_WINDOWS).\n"
+            f"Build it first:  sbatch slurm/build_windows.slurm <Dataset>\n"
+            f"Or unset SPARTA_REQUIRE_WINDOWS to re-assemble from the feature files "
+            f"(~40 min of single-threaded pandas, with this job's GPU idle).")
 
     # Derive T from the dataset's daily snapshot grid.
     if transactions is None:
@@ -124,11 +157,18 @@ def build_sequence_dataset(dataset, type_dataset, echo, K, task,
         cache_dir, f"{type_dataset}{suffix}_K{K}_T{T}_{task}.npz")
     if use_cache and os.path.exists(cache_path):
         d = np.load(cache_path, allow_pickle=True)
-        if "X" in d.files:  # legacy full-window dump (pre-dedup format)
-            return d["X"], d["mask"], d["y"], d["anchors"], d["nodes"]
-        X, mask = _expand_windows(d["values"], d["idx"])
+        if "X" in d.files:
+            # Legacy full-window dump (pre-dedup format): wrap it in the compact contract
+            # rather than reject it. reshape is a VIEW of the loaded X, so this costs only the
+            # index array — it just carries no dedup saving, unlike a real compact source.
+            X_legacy, mask_legacy = d["X"], d["mask"]
+            n, k = mask_legacy.shape
+            idx_legacy = np.arange(n * k, dtype=np.int32).reshape(n, k)
+            idx_legacy[~mask_legacy] = -1
+            return (X_legacy.reshape(-1, X_legacy.shape[-1]), idx_legacy,
+                    d["y"], d["anchors"], d["nodes"])
         nodes = d["node_values"][d["node_codes"]].astype(object)
-        return X, mask, d["y"], d["anchors"], nodes
+        return d["values"], d["idx"], d["y"], d["anchors"], nodes
 
     # Load + validate every snapshot once.
     snapshots = [_load_snapshot(i, type_dataset, suffix, features_dir) for i in range(T)]
@@ -196,8 +236,50 @@ def build_sequence_dataset(dataset, type_dataset, echo, K, task,
                                 node_values=node_values)
         os.replace(tmp_path, cache_path)
 
+    return values, idx, y, anchors, nodes
+
+
+def build_sequence_dataset(*args, **kwargs):
+    """DENSE wrapper over build_sequence_windows: (X, mask, y, anchors, nodes) with
+    X float32 [N, K, F] (absent steps zeroed) and mask bool [N, K].
+
+    Kept for callers that need the whole dense tensor in one array (notebooks, ad-hoc
+    analysis). The experiments do NOT use it: X is ~K times `values`, so materialising it
+    dominates their memory request for no benefit — they call build_sequence_windows and
+    gather per batch instead."""
+    values, idx, y, anchors, nodes = build_sequence_windows(*args, **kwargs)
     X, mask = _expand_windows(values, idx)
     return X, mask, y, anchors, nodes
+
+
+def fit_scaler_compact(values, idx, train_idx):
+    """(mu, sd) over the unique (snapshot, node) cells the TRAIN windows reference — the
+    compact-form equivalent of fit_scaler, without materialising any windows.
+
+    A row of `values` IS one (snapshot, node) cell, so "don't over-weight a snapshot reused
+    across many windows" is exactly np.unique over the referenced row indices; fit_scaler
+    spells the same thing out with a Python set of (node, snapshot) tuples. Accumulated in
+    float64 as before. The dedup ROW ORDER differs (ascending vs first-encounter), so mu/sd
+    can differ from fit_scaler in the last ULP — ~1e-16 relative, not a semantic change."""
+    ref = np.unique(idx[train_idx])
+    ref = ref[ref >= 0]
+    flat = values[ref]
+    # dtype=float64 accumulates in double WITHOUT materialising a float64 copy of the block
+    # (that copy was ~5 GB at AMLWorld scale, and is the largest host allocation left on this
+    # path). float32 -> float64 is exact, so the sums are bit-identical to converting first.
+    mu = flat.mean(0, dtype=np.float64)
+    sd = flat.std(0, dtype=np.float64)
+    sd = np.where(sd < 1e-8, 1e-8, sd)
+    return mu.astype(np.float32), sd.astype(np.float32)
+
+
+def apply_scaler_compact(values, mu, sd):
+    """(values - mu) / sd on the compact block — one allocation, K times smaller than
+    apply_scaler's. Absent steps need no re-zeroing here: they are not rows of `values` at
+    all (idx == -1), and the gather that builds a window zeroes them."""
+    Vs = values - mu
+    Vs /= sd
+    return Vs.astype(np.float32, copy=False)
 
 
 class SequenceDataset(torch.utils.data.Dataset):

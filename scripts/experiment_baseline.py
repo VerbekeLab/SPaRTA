@@ -20,8 +20,9 @@ from sklearn.metrics import average_precision_score
 from src.utils.setup import (load_config, resolve_dataset, resolve_timing,
                              resolve_sequence, run_tag, suggest_param,
                              resolve_storage, make_pruner, remaining_trials,
-                             walltime_budget, resolve_ts_cache_dir, cleanup_storage)
-from src.data.sequence_data import build_sequence_dataset, temporal_split
+                             walltime_budget, resolve_ts_cache_dir, cleanup_storage,
+                             resolve_window_store_dir, require_prebuilt_windows)
+from src.data.sequence_data import build_sequence_windows, temporal_split
 from src.methods import evaluation
 
 SEED = 1997
@@ -83,7 +84,6 @@ def run_nn_baseline(Xtr2d, ytr, Xval2d, yval, Xte2d, search_space, seed=SEED,
     Returns (probs_te, best_params, best_value)."""
     import torch
     import torch.nn as nn
-    from torch.utils.data import TensorDataset, DataLoader
     from sklearn.preprocessing import StandardScaler
     from src.methods.models import NeuralNetwork
 
@@ -91,7 +91,7 @@ def run_nn_baseline(Xtr2d, ytr, Xval2d, yval, Xte2d, search_space, seed=SEED,
                           else "mps" if torch.backends.mps.is_available() else "cpu")
 
     # Standardise (fit on TRAIN only); the trees did not need this, the MLP does. Tensors
-    # are moved to the device once so the DataLoader yields device batches directly.
+    # are moved to the device once, so the training loop only ever gathers from device memory.
     scaler = StandardScaler().fit(Xtr2d)
     Xtr = torch.as_tensor(scaler.transform(Xtr2d), dtype=torch.float32).to(device)
     Xval = torch.as_tensor(scaler.transform(Xval2d), dtype=torch.float32).to(device)
@@ -118,15 +118,27 @@ def run_nn_baseline(Xtr2d, ytr, Xval2d, yval, Xte2d, search_space, seed=SEED,
         criterion = nn.BCEWithLogitsLoss(pos_weight=pos_weight)
         opt = torch.optim.Adam(model.parameters(), lr=params["lr"],
                                weight_decay=params.get("weight_decay", 1e-5))
-        loader = DataLoader(TensorDataset(Xtr, ytr_t), batch_size=params["batch_size"],
-                            shuffle=True, generator=torch.Generator().manual_seed(seed))
+        # Mini-batches are sliced out of a per-epoch permutation rather than drawn from a
+        # DataLoader(TensorDataset(...)). A DataLoader fetches ONE ROW AT A TIME and collates
+        # them, so on device-resident tensors it spends a couple of kernel launches PER SAMPLE:
+        # measured ~10 us/sample, i.e. minutes of pure launch overhead per epoch at these row
+        # counts (millions) against milliseconds of actual GEMM — which is why the A100 sat at
+        # 3-4% utilisation. That cost is proportional to batch_size, so raising batch_size could
+        # not fix it. One gather per batch makes batch assembly ~free and lets batch_size cut the
+        # step count as intended. NOTE: this changes the shuffle stream (a DataLoader draws from
+        # its generator in its own way), so MLP baseline numbers shift within run-to-run noise —
+        # re-run a combo's MLP rather than comparing across the change.
+        n_train, bs = Xtr.shape[0], params["batch_size"]
+        gen = torch.Generator(device=device).manual_seed(seed)
 
         best_ap, best_state, wait = -1.0, None, 0
         for epoch in range(params["epochs"]):    # 'epochs' is the max_epochs cap; patience/pruning end sooner
             model.train()
-            for xb, yb in loader:
+            perm = torch.randperm(n_train, device=device, generator=gen)
+            for i in range(0, n_train, bs):
+                idx = perm[i:i + bs]
                 opt.zero_grad()
-                criterion(model(xb).squeeze(-1), yb).backward()
+                criterion(model(Xtr[idx]).squeeze(-1), ytr_t[idx]).backward()
                 opt.step()
             model.eval()
             with torch.no_grad():
@@ -185,21 +197,29 @@ def run_iforest_baseline(Xtr2d, Xte2d, params=None, seed=SEED):
     return -clf.score_samples(Xte2d)
 
 
-def _xgb_arrays(X, K, task):
-    """Per-task 2D feature arrays from the RAW (unscaled) windows.
+def _xgb_arrays(values, band_idx, K, task):
+    """Per-task 2D feature array for ONE band, gathered straight from the compact
+    (values, idx) form — the dense [N, K, 90] window tensor is never materialised.
     nowcast  -> anchor step (K-1) only, 90 feats.
     forecast -> ALL K window steps flattened (K*90). The forecast window [a-K..a-1]
     already excludes the anchor (builder offsets base=a-K), so every step is history;
     the baselines must see the same K-step history the sequence models do — slicing it
     shorter would silently handicap them and confound the sequential-vs-not comparison.
 
-    Callers pass a fancy-indexed band copy of the (huge) window tensor; nowcast copies its
-    single step out contiguously so that K-times-larger temporary can be freed, instead of
-    being pinned alive by a strided view. (Forecast's reshape IS the whole block — a view
-    there wastes nothing.)"""
+    `band_idx` is this band's [n, K] slice of idx. Absent steps (-1) read as 0.0, matching
+    _expand_windows. Nowcast gathers ONE column, so it allocates n x 90 instead of the
+    n x K x 90 it used to build and immediately throw 1/K'th of away. Forecast still needs a
+    real dense 2D matrix (XGBoost's DMatrix, sklearn), but only for this band — the old flow
+    built the full-population tensor first and copied each band out of it, roughly doubling
+    the peak."""
     if task == "nowcast":
-        return np.ascontiguousarray(X[:, K - 1, :])
-    return X.reshape(X.shape[0], -1)
+        col = band_idx[:, K - 1]
+        out = values[np.maximum(col, 0)]
+        out[col < 0] = 0.0
+        return out
+    win = values[np.maximum(band_idx, 0)]
+    win[band_idx < 0] = 0.0
+    return win.reshape(win.shape[0], -1)
 
 
 if __name__ == "__main__":
@@ -270,14 +290,18 @@ if __name__ == "__main__":
     model_suffix = "" if selected == ALL_MODELS else "_" + "-".join(selected)
 
     # --- Build the SAME windowed dataset the sequence models use (same tag-namespaced
-    # features_dir + cache_dir as experiment_LSTM.py; resolve_ts_cache_dir sends the
-    # cache to $VSC_SCRATCH on the cluster, or disables it under SPARTA_TS_CACHE=off).
+    # features_dir + cache_dir + store_dir as experiment_LSTM.py). Sources in order: the
+    # prebuilt per-tag window store (Stage 1.5, seconds), this combo's .npz cache, then a full
+    # re-assembly from the feature files. resolve_ts_cache_dir / resolve_window_store_dir both
+    # send their artefacts to $VSC_SCRATCH on the cluster.
     # The baselines need only the raw per-task 2D arrays (no scaling — trees and
     # isolation splits are scale-invariant).
-    X, mask, y, anchors, nodes = build_sequence_dataset(
+    values, idx, y, anchors, nodes = build_sequence_windows(
         dataset, type_dataset, echo, K, task,
         features_dir=os.path.join(bl_cfg.get("data_directory", "results/features"), tag),
         cache_dir=resolve_ts_cache_dir(tag),
+        store_dir=resolve_window_store_dir(tag),
+        require_prebuilt=require_prebuilt_windows(),
         time_step=net_cfg["time_step"], time_width=net_cfg["time_width"],
         time_type=net_cfg["time_type"])
 
@@ -287,21 +311,24 @@ if __name__ == "__main__":
 
     # Drop all-masked rows per band (forecast no-history rows; nowcast anchor is
     # always valid). Mirrors experiment_LSTM.py so both consume the same node sets.
-    def _band(idx):
-        return idx[mask[idx].any(1)]
+    # mask is just idx >= 0 in the compact form, so no dense mask array is needed.
+    def _band(band):
+        return band[(idx[band] >= 0).any(1)]
     train_idx, val_idx, test_idx = _band(train_idx), _band(val_idx), _band(test_idx)
 
     ytr = y[train_idx]
     yval = y[val_idx]
     y_test = y[test_idx]
 
-    Xtr2d = _xgb_arrays(X[train_idx], K, task)
-    Xval2d = _xgb_arrays(X[val_idx], K, task)
-    Xte2d = _xgb_arrays(X[test_idx], K, task)
-    del X    # tens of GB at AMLWorld scale; the models read only the 2D band arrays above
+    Xtr2d = _xgb_arrays(values, idx[train_idx], K, task)
+    Xval2d = _xgb_arrays(values, idx[val_idx], K, task)
+    Xte2d = _xgb_arrays(values, idx[test_idx], K, task)
+    n_rows_values = len(values)
+    del values, idx    # the models read only the 2D band arrays above
     print(f"Baselines {selected} | task={task} K={K} echo={echo} | "
           f"train {len(train_idx)} val {len(val_idx)} test {len(test_idx)} "
-          f"| 2D feature dim = {Xtr2d.shape[1]}")
+          f"| 2D feature dim = {Xtr2d.shape[1]} "
+          f"| gathered from {n_rows_values:,} compact rows (no dense [N, K, F] tensor)")
 
     os.makedirs("results/tuning", exist_ok=True)
     os.makedirs("results/experiments", exist_ok=True)
