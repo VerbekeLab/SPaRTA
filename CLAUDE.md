@@ -114,7 +114,13 @@ time-windowed (snapshot) construction with optional exponential time-decay ("ech
     on VSC; see `resolve_window_store_dir`). Transient — rebuild with `build_windows.slurm`.
   - `results/pickle/` — batched rendered images (`nodes_<i>.pkl` + `images_tensor_<i>.h5`).
   - `results/experiments/` — per-model metric dumps (text).
-  - `results/tuning/` — Optuna / grid-search best params.
+  - `results/tuning/` — Optuna / grid-search best params, plus one **persistent** SQLite per
+    Optuna study (`<study_name>.db`). These are never deleted: `optimize_study`
+    ([src/utils/setup.py](src/utils/setup.py)) tops a study up to `n_trials` and runs nothing
+    when it is already there, so a resubmitted job skips tuning instead of restarting it, and
+    a `.db` with `n_trials` finished trials is the on-disk record that that cell is done
+    (what [slurm/missing_runs.sh](slurm/missing_runs.sh) audits). Delete one by hand only to
+    force a fresh search — required after changing a `search_space` categorical.
   - `results/models/` — saved `state_dict`s.
 - **Class imbalance:** `BCEWithLogitsLoss(pos_weight=...)` with the empirical
   negative/positive ratio (sometimes scaled). Don't substitute focal loss etc. silently.
