@@ -141,6 +141,40 @@ def resolve_ts_cache_dir(tag: str) -> str | None:
     return os.path.join("results/timeseries", tag)
 
 
+def resolve_window_store_dir(tag: str) -> str | None:
+    """Per-TAG directory for the prebuilt window store (src/data/window_store.py), or ``None``
+    to disable it (every job then re-assembles windows from the feature files, the old path).
+
+    Resolution mirrors :func:`resolve_ts_cache_dir`:
+      1. ``SPARTA_WINDOW_STORE=off`` (also ``0``/``none``/``false``) -> ``None``;
+      2. ``SPARTA_WINDOW_STORE=<dir>`` -> ``<dir>/<tag>``;
+      3. ``$VSC_SCRATCH`` set -> ``$VSC_SCRATCH/SPaRTA/windows/<tag>``;
+      4. otherwise ``results/windows/<tag>``.
+
+    The store is keyed on the tag ALONE (not K/task), because the stacked snapshot block it
+    holds is the same for every (K, task) of a tag — that is the whole point of it.
+    """
+    raw = os.environ.get("SPARTA_WINDOW_STORE", "").strip()
+    if raw.lower() in ("off", "0", "none", "false"):
+        return None
+    if raw:
+        return os.path.join(raw, tag)
+    scratch = os.environ.get("VSC_SCRATCH", "").strip()
+    if scratch:
+        return os.path.join(scratch, "SPaRTA", "windows", tag)
+    return os.path.join("results/windows", tag)
+
+
+def require_prebuilt_windows() -> bool:
+    """True when a job must NOT fall back to re-assembling windows from the feature files.
+
+    Set ``SPARTA_REQUIRE_WINDOWS=1`` in GPU jobs: the fallback is ~40 min of single-threaded
+    pandas work with the GPU allocated and idle, so a missing store should fail the job in
+    seconds (rerun scripts/build_window_store.py) rather than quietly pay for it.
+    """
+    return os.environ.get("SPARTA_REQUIRE_WINDOWS", "").strip().lower() in ("1", "true", "yes", "on")
+
+
 def suggest_param(trial, name: str, spec: Any):
     """
     Map a YAML search-space entry to an Optuna ``trial.suggest_*`` call.
