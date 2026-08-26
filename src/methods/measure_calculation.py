@@ -13,7 +13,7 @@ from multiprocessing import Pool, cpu_count
 
 from src.utils.setup import load_config, resolve_dataset, resolve_dynamic, resolve_timing, run_tag
 from src.utils.graph_processing import graph_community
-from src.utils.feature_io import save_table
+from src.utils.feature_io import find_table, save_table
 
 from src.data.network_data_loader import *
 from src.data.utils.dates import define_dates
@@ -137,24 +137,47 @@ if __name__ == "__main__":
             )
             n_snapshots = len(start_dates)
 
+            os.makedirs(out_dir, exist_ok=True)
+
+            # RESUME: skip snapshots already on disk. Filtering the DATE GRID (not the loop
+            # body) is what makes it free — the generator builds each graph BEFORE the body
+            # runs, so a body-level `continue` would still pay construction for every window.
+            # BOTH tables must be present: a kill between the two writes leaves a snapshot
+            # with no labels, which _load_snapshot rejects. find_table (not os.path.exists)
+            # so a legacy .csv run counts as done, and save_table writes atomically so a
+            # present file is a complete one. This is what lets a wall-time-killed extraction
+            # finish by resubmission instead of restarting from snapshot 0.
+            suffix = "_echo" if echo else ""
+            stem = lambda i, kind: os.path.join(out_dir, f"{type_dataset}_dynamic_{i}_{kind}{suffix}")
+            pending = [i for i in range(n_snapshots)
+                       if find_table(stem(i, "features")) is None
+                       or find_table(stem(i, "labels")) is None]
+            if not pending:
+                print(f"All {n_snapshots} snapshots already extracted in {out_dir} — nothing to do.")
+            elif len(pending) < n_snapshots:
+                print(f"Resuming: {n_snapshots - len(pending)}/{n_snapshots} snapshots already "
+                      f"in {out_dir}; building {len(pending)}.")
+
             networks_iter = construct_network_time_iter(
-                start_dates, end_dates, dataset=network, type_dataset=type_dataset,
+                [start_dates[i] for i in pending], [end_dates[i] for i in pending],
+                dataset=network, type_dataset=type_dataset,
                 echo=echo, days_echo=days_echo, transactions=transactions
             )
-            os.makedirs(out_dir, exist_ok=True)
             # Manual counter, NOT enumerate(): CPython's enumerate (and zip) reuse
             # their cached result tuple, which keeps a strong ref to the PREVIOUS
             # (G, labels) until AFTER the generator has built the next snapshot —
             # holding two graphs resident and defeating the del/gc below.
-            i = -1
+            pos = -1
             for G, labels in networks_iter:
-                i += 1
+                pos += 1
+                # The SNAPSHOT index, not the loop position: filenames encode it and
+                # _load_snapshot reads range(T) contiguously, so it must not shift.
+                i = pending[pos]
                 print(f"Processing dynamic network snapshot {i+1}/{n_snapshots}...")
                 df = process_graph(G)
 
-                suffix = "_echo" if echo else ""
-                stem_features = os.path.join(out_dir, f"{type_dataset}_dynamic_{i}_features{suffix}")
-                stem_labels = os.path.join(out_dir, f"{type_dataset}_dynamic_{i}_labels{suffix}")
+                stem_features = stem(i, "features")
+                stem_labels = stem(i, "labels")
 
                 out_path_features = save_table(df, stem_features)
                 print(f"Results saved to {out_path_features}")

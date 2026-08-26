@@ -28,7 +28,14 @@ def save_table(df, stem):
             df[col] = df[col].astype(object)
 
     path = f"{stem}.parquet"
-    df.to_parquet(path, compression="zstd", index=False)
+    # Write to a per-process temp file and os.replace() it into place: a reader — and the
+    # dynamic extraction's skip-existing resume check — then sees either no file or a
+    # COMPLETE one, never a truncated .parquet left by a wall-time kill mid-write (which
+    # `exists` would happily accept). os.replace is atomic within a filesystem, and results/
+    # is one. Same pattern as the .npz cache and the window store.
+    tmp = f"{path}.{os.getpid()}.tmp"
+    df.to_parquet(tmp, compression="zstd", index=False)
+    os.replace(tmp, path)
     return path
 
 

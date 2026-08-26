@@ -24,7 +24,11 @@ time-windowed (snapshot) construction with optional exponential time-decay ("ech
   Neighbourhood selection in [src/methods/utils/neighbourhood_functions.py](src/methods/utils/neighbourhood_functions.py).
 - **Feature extraction entry point** — [src/methods/measure_calculation.py](src/methods/measure_calculation.py)
   (`__main__`). Run from the repo root; writes `results/features/<type>_..._features.parquet`
-  and matching `_labels.parquet` (zstd, via [src/utils/feature_io.py](src/utils/feature_io.py)).
+  and matching `_labels.parquet` (zstd, via [src/utils/feature_io.py](src/utils/feature_io.py),
+  which writes to a temp file and `os.replace`s it into place so a killed job never leaves a
+  truncated table). The **dynamic** branch is resumable: it filters the date grid to snapshots
+  whose feature+label tables are not yet on disk, so a wall-time kill continues on resubmit
+  instead of restarting from snapshot 0. The static branch has no such granularity.
   Readers take extension-less stems and prefer Parquet with a legacy `.csv` fallback;
   `scripts/convert_features_to_parquet.py` migrates pre-existing CSVs in place
   (`--delete` to reclaim the disk space).
