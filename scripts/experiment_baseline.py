@@ -19,8 +19,8 @@ from sklearn.metrics import average_precision_score
 
 from src.utils.setup import (load_config, resolve_dataset, resolve_timing,
                              resolve_sequence, run_tag, suggest_param,
-                             resolve_storage, make_pruner, remaining_trials,
-                             walltime_budget, resolve_ts_cache_dir, cleanup_storage,
+                             resolve_storage, make_pruner, optimize_study,
+                             resolve_ts_cache_dir,
                              resolve_window_store_dir, require_prebuilt_windows)
 from src.data.sequence_data import build_sequence_windows, temporal_split
 from src.methods import evaluation
@@ -62,10 +62,10 @@ def run_xgb_baseline(Xtr2d, ytr, Xval2d, yval, Xte2d, search_space, seed=SEED, n
     study = optuna.create_study(direction="maximize", sampler=sampler, study_name=study_name,
                                 storage=storage, load_if_exists=True,
                                 pruner=optuna.pruners.NopPruner())
-    # timeout: stop starting trials before Slurm's wall-time kill so the final refit and
-    # metrics still get written; the resumed study tops back up to n_trials on resubmit.
-    study.optimize(objective, n_trials=remaining_trials(study, n_trials),
-                   timeout=walltime_budget())
+    # Runs only the trials still missing from the budget, under a wall-time timeout so the
+    # final refit and metrics still get written; the resumed study tops back up to n_trials
+    # on resubmit, and one already at n_trials skips tuning entirely.
+    optimize_study(study, objective, n_trials, label=study_name)
     best_params = study.best_params
 
     return _fit(**best_params).predict_proba(Xte2d)[:, 1], best_params, study.best_value
@@ -174,10 +174,9 @@ def run_nn_baseline(Xtr2d, ytr, Xval2d, yval, Xte2d, search_space, seed=SEED,
     study = optuna.create_study(direction="maximize", sampler=sampler, study_name=study_name,
                                 storage=storage, load_if_exists=True,
                                 pruner=(pruner or optuna.pruners.NopPruner()))
-    # timeout recomputed per call: when this runs after the XGBoost study in one job it
-    # gets whatever wall clock that study left over (see walltime_budget's docstring).
-    study.optimize(objective, n_trials=remaining_trials(study, n_trials),
-                   timeout=walltime_budget())
+    # Wall-time budget recomputed per call: when this runs after the XGBoost study in one
+    # job it gets whatever wall clock that study left over (see walltime_budget's docstring).
+    optimize_study(study, objective, n_trials, label=study_name)
     best_params = study.best_params
 
     # Refit the best config on train (early-stopped on val, as in run_xgb_baseline) and score test.
@@ -376,9 +375,6 @@ if __name__ == "__main__":
     #     save_path=f"results/experiments/{stem}_baselines{model_suffix}.png")
     print(f"Wrote metrics -> {metrics_path}")
 
-    # All outputs are on disk, so the resumable SQLites are no longer needed; each is kept
-    # only when the walltime timeout stopped its study short of its budget (a resubmit tops up).
-    if "XGBoost" in selected:
-        cleanup_storage(resolve_storage(bl_cfg, study_name=xgb_study), xgb_study, n_trials)
-    if "NeuralNetwork" in selected:
-        cleanup_storage(resolve_storage(bl_cfg, study_name=nn_study), nn_study, nn_n_trials)
+    # The per-study SQLites in results/tuning/ are deliberately KEPT — see optimize_study.
+    # They are the on-disk record of which cells finished their trial budget, and they make an
+    # accidental resubmission cheap (it skips tuning) instead of a full re-tune.

@@ -24,8 +24,7 @@ from src.data.feature_data import ImageDataset
 from src.methods.models import CNN
 from src.methods import evaluation
 from src.utils.setup import (load_config, resolve_dataset, suggest_param,
-                             resolve_storage, make_pruner, remaining_trials,
-                             walltime_budget, cleanup_storage)
+                             resolve_storage, make_pruner, optimize_study)
 from src.utils.feature_io import load_table
 
 SEED = 1997
@@ -122,11 +121,11 @@ def _tune_cnn(study_name, storage, n_trials, search_space, num_channels,
         storage=storage,
         load_if_exists=True,
     )
-    # timeout: stop starting trials before Slurm's wall-time kill (walltime_budget leaves
-    # SPARTA_WALL_MARGIN_S for the in-flight trial + final refit) so best-params/metrics
-    # still get written; the resumed study tops back up to n_trials on resubmit.
-    study.optimize(objective, n_trials=remaining_trials(study, n_trials),
-                   timeout=walltime_budget())
+    # Runs only the trials still missing from the budget, stopping before Slurm's wall-time
+    # kill (walltime_budget leaves SPARTA_WALL_MARGIN_S for the in-flight trial + final refit)
+    # so best-params/metrics still get written; the resumed study tops back up to n_trials on
+    # resubmit, and one already at n_trials skips tuning entirely.
+    optimize_study(study, objective, n_trials, label=study_name)
     return study.best_params, study.best_value
 
 
@@ -176,7 +175,7 @@ if __name__ == "__main__":
     os.makedirs("results/experiments", exist_ok=True)
 
     # Per-study SQLite (resolve_storage templates the URL on study_name) so the study
-    # resumes after a Slurm timeout; remaining_trials tops it up to n_trials on resume.
+    # resumes after a Slurm timeout; optimize_study tops it up to n_trials on resume.
     study_name = f"CNN_{type_dataset}"
     best_params, best_value = _tune_cnn(
         study_name, resolve_storage(cnn_cfg, study_name=study_name), cnn_cfg['n_trials'],
@@ -205,6 +204,6 @@ if __name__ == "__main__":
         save_path=f"results/experiments/{type_dataset}_CNN.png")
     print(f"Wrote metrics -> {metrics_path}")
 
-    # All outputs are on disk, so the resumable SQLite is no longer needed; kept only when
-    # the walltime timeout stopped the study short of n_trials (a resubmit tops it up).
-    cleanup_storage(resolve_storage(cnn_cfg, study_name=study_name), study_name, cnn_cfg['n_trials'])
+    # The per-study SQLite in results/tuning/ is deliberately KEPT — see optimize_study. It is
+    # the on-disk record that this study finished its n_trials budget, and it makes an
+    # accidental resubmission cheap (it skips tuning) instead of a full re-tune.

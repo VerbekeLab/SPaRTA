@@ -19,8 +19,8 @@ from sklearn.metrics import average_precision_score
 
 from src.utils.setup import (load_config, resolve_dataset, resolve_timing,
                              resolve_sequence, run_tag, suggest_param,
-                             resolve_storage, make_pruner, remaining_trials,
-                             walltime_budget, resolve_ts_cache_dir, cleanup_storage,
+                             resolve_storage, make_pruner, optimize_study,
+                             resolve_ts_cache_dir,
                              resolve_window_store_dir, require_prebuilt_windows)
 from src.data.sequence_data import (build_sequence_windows, temporal_split,
                                      fit_scaler_compact, apply_scaler_compact)
@@ -167,11 +167,11 @@ def _tune_arch(arch, study_name, storage, n_trials, search_space, n_features,
                                 study_name=study_name, storage=storage,
                                 load_if_exists=True,
                                 pruner=(pruner or optuna.pruners.NopPruner()))
-    # timeout: stop starting trials before Slurm's wall-time kill so the final refit and
-    # metrics still get written. Recomputed per call — the second architecture's study
-    # gets whatever wall clock the first left over; both top up on resubmit.
-    study.optimize(objective, n_trials=remaining_trials(study, n_trials),
-                   timeout=walltime_budget())
+    # optimize_study runs only the trials still missing from the budget, under a wall-time
+    # timeout so the final refit and metrics still get written. The budget is recomputed per
+    # call — the second architecture's study gets whatever wall clock the first left over;
+    # both top up on resubmit, and a study already at n_trials runs nothing at all.
+    optimize_study(study, objective, n_trials, label=study_name)
     return study.best_params, study.best_value
 
 
@@ -352,7 +352,6 @@ if __name__ == "__main__":
     #     save_path=f"results/experiments/{stem}_timeseries{model_suffix}.png")
     print(f"Wrote metrics -> {metrics_path}")
 
-    # All outputs are on disk, so the resumable SQLites are no longer needed; each is kept
-    # only when the walltime timeout stopped its study short of n_trials (a resubmit tops up).
-    for _, study_name, _ in archs:
-        cleanup_storage(resolve_storage(ts_cfg, study_name=study_name), study_name, n_trials)
+    # The per-study SQLites in results/tuning/ are deliberately KEPT — see optimize_study.
+    # They are the on-disk record of which cells finished their n_trials budget, and they make
+    # an accidental resubmission cheap (it skips tuning) instead of a full re-tune.
