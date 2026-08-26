@@ -119,8 +119,22 @@ they have finished; to force it strictly after those too, add their job ids to i
 `--dependency`.
 
 Tips: append `%8` to a training script's `--array` (e.g. `0-23%8`) to cap concurrent tasks if
-your GPU/CPU allocation is limited. Raise `--time=` or shrink `timeseries.n_trials` in
-`config/methods/config.yaml` if the 24 h LSTM wall time is tight.
+your GPU/CPU allocation is limited.
+
+**Wall times are capped at 6 h** across every script (queue priority; the old 24 h requests
+were also what the VSC resource-usage warnings flagged). The Optuna jobs absorb that fine —
+each study persists to SQLite, stops starting trials `SPARTA_WALL_MARGIN_S` before the kill,
+and tops its trial count up on resubmit (`bash slurm/missing_runs.sh` lists which cells still
+need one). The **dynamic extraction** resumes too: `measure_calculation.py` skips snapshots
+whose feature *and* label tables are already on disk (`find_table`, so legacy `.csv` runs
+count), and `save_table` writes to a temp file + `os.replace`, so a file that exists is
+complete rather than a truncated `.parquet` a kill left behind. Resubmit it until it reports
+`nothing to do`.
+
+Three things still do NOT resume, so a 6 h kill loses their work: the **static** extraction
+(`extract_features.slurm` / `_sequential.slurm` — one network, no per-snapshot granularity),
+`render_pictures.slurm`, and `train_vgg16.slurm` (no checkpointing). Reduce the work per
+submission rather than resubmitting those.
 
 ## Failed / timed-out tasks: what to resubmit
 

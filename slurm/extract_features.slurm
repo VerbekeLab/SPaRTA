@@ -10,7 +10,11 @@
 #SBATCH --job-name=sparta_extract
 #SBATCH --output=slurm/logs/extract_%j.out
 #SBATCH --error=slurm/logs/extract_%j.err
-#SBATCH --time=16:00:00
+# WALL TIME capped at 6h. NOTE: the static branch builds ONE network, so there is nothing to
+# resume — a kill at the cap loses the run. (The dynamic extraction skips completed snapshots;
+# the static one has no such granularity.) If it does not fit in 6h, reduce the work rather
+# than resubmitting.
+#SBATCH --time=06:00:00
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=8

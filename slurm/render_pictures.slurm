@@ -13,7 +13,11 @@
 #SBATCH --job-name=sparta_render
 #SBATCH --output=slurm/logs/render_%j.out
 #SBATCH --error=slurm/logs/render_%j.err
-#SBATCH --time=24:00:00
+# WALL TIME capped at 6h. NOTE: visualising_network.py has NO skip-existing logic, so a task
+# killed at the cap restarts from the first batch on resubmit rather than continuing. Render
+# fewer nodes per submission if 6h is not enough — or give it the same skip-existing check the
+# dynamic extraction uses (see the `pending` list in measure_calculation.py).
+#SBATCH --time=06:00:00
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=8

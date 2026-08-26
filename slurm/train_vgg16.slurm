@@ -17,7 +17,10 @@
 #SBATCH --job-name=sparta_vgg16
 #SBATCH --output=slurm/logs/train_vgg16_%j.out
 #SBATCH --error=slurm/logs/train_vgg16_%j.err
-#SBATCH --time=12:00:00
+# WALL TIME capped at 6h. experiment_pictures.py is a fixed 10-epoch loop with no Optuna and
+# no checkpointing, so a kill at the cap loses the run entirely — lower `num_epochs` there if
+# 6h is not enough.
+#SBATCH --time=06:00:00
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=8

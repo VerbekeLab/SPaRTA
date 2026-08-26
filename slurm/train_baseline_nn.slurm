@@ -16,7 +16,7 @@
 #SBATCH --output=slurm/logs/train_baseline_nn_%A_%a.out
 #SBATCH --error=slurm/logs/train_baseline_nn_%A_%a.err
 #SBATCH --array=0-23
-#SBATCH --time=24:00:00
+#SBATCH --time=06:00:00
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=8
@@ -51,9 +51,12 @@ source activate SPaRTA_env
 export OMP_NUM_THREADS=$SLURM_CPUS_PER_TASK
 export MKL_NUM_THREADS=$SLURM_CPUS_PER_TASK
 
-# Optuna stops starting trials 1h (walltime_budget's default margin) before the wall-time
-# kill so the study ends with its refit/metrics written; MLP trials are minutes-scale,
-# so the default fits. Export SPARTA_WALL_MARGIN_S to override.
+# Optuna stops starting trials this long before the wall-time kill so the study ends with its
+# refit/metrics written. walltime_budget's 1h default would be a sixth of this 6h job; an MLP
+# trial is now ~minutes (permutation batching + the prebuilt window store), so 20 min covers
+# the in-flight trial plus the final refit and metric writes. The study resumes from its
+# SQLite on resubmit either way — `bash slurm/missing_runs.sh` lists the cells needing a top-up.
+export SPARTA_WALL_MARGIN_S=1200
 
 source slurm/sweep_common.sh
 resolve_dataset_arg "${1:-}"

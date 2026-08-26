@@ -15,7 +15,11 @@
 #SBATCH --output=slurm/logs/extract_dyn_%A_%a.out
 #SBATCH --error=slurm/logs/extract_dyn_%A_%a.err
 #SBATCH --array=0-3
-#SBATCH --time=24:00:00
+# WALL TIME capped at 6h. This job IS resumable: measure_calculation.py skips snapshots whose
+# feature AND label tables are already on disk, and save_table writes atomically, so a present
+# file is a complete one. A task killed at the cap therefore continues where it stopped on
+# resubmit — AMLSim (199 snapshots) and Tide (181) may need several rounds.
+#SBATCH --time=06:00:00
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=8

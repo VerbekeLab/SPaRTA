@@ -28,7 +28,7 @@
 #SBATCH --error=slurm/logs/train_lstm_%A_%a.err
 # Append %8 (e.g. 0-23%8) to cap concurrent GPU tasks if your allocation is limited.
 #SBATCH --array=0-23
-#SBATCH --time=24:00:00
+#SBATCH --time=06:00:00
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=8
@@ -64,9 +64,12 @@ source activate SPaRTA_env
 export OMP_NUM_THREADS=$SLURM_CPUS_PER_TASK
 export MKL_NUM_THREADS=$SLURM_CPUS_PER_TASK
 
-# Optuna stops starting trials 1h (walltime_budget's default margin) before the wall-time
-# kill so each study ends with its refit/metrics written; trials here are minutes-scale,
-# so the default fits. Export SPARTA_WALL_MARGIN_S to override.
+# Optuna stops starting trials this long before the wall-time kill so each study ends with its
+# refit/metrics written. 30 min covers one in-flight sequence trial (longer than an MLP's) plus
+# the final refit. NOTE this job tunes BOTH architectures in 6h by default — if that is tight,
+# fan them out into separate tasks (`sbatch slurm/train_lstm.slurm <Dataset> lstm`, then
+# `transformer`) rather than raising the wall. Studies resume from SQLite on resubmit.
+export SPARTA_WALL_MARGIN_S=1800
 
 # Dataset from the submission argument; (timing x K x task) from the array index.
 source slurm/sweep_common.sh
