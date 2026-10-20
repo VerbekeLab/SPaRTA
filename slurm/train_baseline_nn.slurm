@@ -26,9 +26,23 @@
 #   the three 2D band arrays total 3.8M/0.87M/0.20M rows x 1530 x 4B = 29.7 GB (XGBoost and
 #   an MLP both need a REAL dense 2D matrix, so for forecast that block must exist once), and
 #   StandardScaler.transform copies the band it is scaling -> +23.2 GB transient on the train
-#   band. ~53 GB peak. The nowcast cells now gather ONE column instead of building all K and
-#   discarding 16/17 of it, so they need a small fraction of this. Check the first cell with
-#   `slurm_jobinfo <jobid>` and tighten further if you want.
+#   band. ~53 GB peak — so this 72G is the FORECAST figure, and it stays the default because
+#   an under-request OOM-kills the task.
+#
+# MEASURED (job 62043355_0, array 0 = nowcast K=7 h6_echo1, 6.19M train rows): 11.29 GiB peak,
+# 02:20:04 walltime, GPU 25% avg / 62% max. Nowcast cells gather ONE column instead of
+# building all K and discarding 16/17 of it, so they need ~1/5 of the forecast request.
+# decode_train makes task the FASTEST axis (task_i = idx % 2, TASKS=(nowcast forecast)), so
+# EVEN array indices are nowcast and ODD are forecast. Split the submission to stop the
+# nowcast half over-requesting:
+#   sbatch --mem=20G --time=04:00:00 --array=0-22:2%4 slurm/train_baseline_nn.slurm <Dataset>
+#   sbatch                           --array=1-23:2%4 slurm/train_baseline_nn.slurm <Dataset>
+# This also cuts the CORE allocation: wice gpu_a100 hands out cores in proportion to the
+# memory share (123G -> 18 cores, 72G -> 11), and the job is single-process (0.98 cores used),
+# so a smaller --mem both queues faster and stops slurm_jobinfo reporting ~9% CPU efficiency.
+# NOTE the forecast cells are NOT just bigger in memory: their input is K*90 (1530 at K=17)
+# against nowcast's 90, so per-epoch compute is ~6x array 0's. Don't infer their walltime
+# from the 02:20 above — leave them at 6h until one has actually finished.
 #SBATCH --mem=72G
 #SBATCH --gpus-per-node=1
 

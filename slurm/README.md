@@ -118,8 +118,22 @@ are reported as gaps. It also picks up the static `train_features` / `train_cnn`
 they have finished; to force it strictly after those too, add their job ids to its
 `--dependency`.
 
-Tips: append `%8` to a training script's `--array` (e.g. `0-23%8`) to cap concurrent tasks if
-your GPU/CPU allocation is limited.
+Tips: append a throttle to a training script's `--array` (e.g. `0-23%4`) to cap concurrent
+tasks — submitting all three datasets' GPU sweeps unthrottled is 216 tasks each wanting its
+own A100, which queues for hours and depresses your fair-share priority. `squeue -M wice -u
+$USER -o "%.14i %.26j %.9T %.11M %R"` shows the pending REASON, which distinguishes genuine
+contention (`Priority`/`Resources`) from a per-user GPU cap (`AssocGrpGpuLimit`).
+
+Because `decode_train` puts task on the fastest axis, EVEN array indices are `nowcast` and ODD
+are `forecast`, and the two differ by ~5x in memory and ~6x in per-epoch compute (nowcast
+input is 90 features, forecast is K*90). Splitting the submission stops the nowcast half
+over-requesting — and since wice allocates cores in proportion to the memory share, a smaller
+`--mem` also shrinks the core count these single-process jobs leave idle:
+
+```bash
+sbatch --mem=20G --time=04:00:00 --array=0-22:2%4 slurm/train_baseline_nn.slurm $DS  # nowcast
+sbatch                           --array=1-23:2%4 slurm/train_baseline_nn.slurm $DS  # forecast
+```
 
 **Wall times are capped at 6 h** across every script (queue priority; the old 24 h requests
 were also what the VSC resource-usage warnings flagged). The Optuna jobs absorb that fine —

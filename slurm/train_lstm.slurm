@@ -41,6 +41,8 @@
 #   overhead. GPU-side residency drops the same way: one shared values_t (~3 GB) instead of
 #   the ~26 GB of dense per-band window tensors. Check the first cell with
 #   `slurm_jobinfo <jobid>` and tighten further if you want.
+# Cores follow the memory share on wice gpu_a100 (123G -> 18 cores, 32G -> ~5), and these jobs
+# are single-process, so this request already keeps the core footprint small.
 #SBATCH --mem=32G
 #SBATCH --gpus-per-node=1
 
