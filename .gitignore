@@ -1,0 +1,37 @@
+# macOS
+.DS_Store
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+.ipynb_checkpoints/
+.venv/
+venv/
+env/
+.env
+
+# Data (downloaded / generated, not needed in repo)
+/data/
+/res/
+/results/
+
+# Slurm job logs (job outputs land there on the cluster; local copies for debugging)
+slurm/logs/
+
+# Notebooks are excluded, except the version-controlled time-series prototype
+# (and its design doc), which are intentionally tracked.
+/notebooks/*
+!/notebooks/test_timeseries.ipynb
+!/notebooks/TIMESERIES_PLAN.md
+
+# Generated pictures / visualisations
+src/data/pictures/
+*.png
+*.pdf
+
+# Local-only context notes for Claude (not for the public repo)
+/PAPER_CONTEXT.md
+/optuna_xgboost.txt
