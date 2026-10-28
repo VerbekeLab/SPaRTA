@@ -67,11 +67,12 @@ export OMP_NUM_THREADS=$SLURM_CPUS_PER_TASK
 export MKL_NUM_THREADS=$SLURM_CPUS_PER_TASK
 
 # Optuna stops starting trials this long before the wall-time kill so each study ends with its
-# refit/metrics written. 30 min covers one in-flight sequence trial (longer than an MLP's) plus
-# the final refit. NOTE this job tunes BOTH architectures in 6h by default — if that is tight,
-# fan them out into separate tasks (`sbatch slurm/train_cnn_seq.slurm <Dataset> lstm`, then
-# `transformer`) rather than raising the wall. Studies resume from SQLite on resubmit.
-export SPARTA_WALL_MARGIN_S=1800
+# refit/metrics written. 60 min covers one in-flight sequence trial (up to ~35 min on Tide
+# nowcast) plus the final refit (~25 min); 30 min was not enough for the flat-input sibling
+# (train_lstm.slurm, job 62378415). NOTE this job tunes BOTH architectures in 6h by default —
+# if that is tight, fan them out into separate tasks (`sbatch slurm/train_cnn_seq.slurm <Dataset>
+# lstm`, then `transformer`) rather than raising the wall. Studies resume from SQLite on resubmit.
+export SPARTA_WALL_MARGIN_S=3600
 
 # Dataset from the submission argument; (timing x K x task) from the array index.
 source slurm/sweep_common.sh
