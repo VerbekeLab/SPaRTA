@@ -23,6 +23,7 @@
 #
 # Models covered and the submit command each maps to:
 #   LSTM / Transformer                -> train_lstm.slurm <Dataset> lstm|transformer
+#   CNN-LSTM / CNN-Transformer       -> train_cnn_seq.slurm <Dataset> lstm|transformer
 #   XGBoost / IsolationForest        -> train_baseline.slurm <Dataset> xgboost|iforest
 #   NeuralNetwork (MLP)              -> train_baseline_nn.slurm <Dataset>
 #
@@ -42,7 +43,7 @@ shopt -s nullglob
 
 source slurm/sweep_common.sh
 
-MODELS="LSTM Transformer XGBoost NeuralNetwork IsolationForest"
+MODELS="LSTM Transformer CNN-LSTM CNN-Transformer XGBoost NeuralNetwork IsolationForest"
 TOTAL=$((N_TIMING * N_K * N_TASK))
 
 # Reading a study's trial count needs the sqlite3 CLI; without it every tuned cell that has a
@@ -85,6 +86,7 @@ _budget_of() {
     local sec key v
     case $1 in
         LSTM|Transformer) sec=timeseries; key=n_trials ;;
+        CNN-LSTM|CNN-Transformer) sec=cnn_seq; key=n_trials ;;
         XGBoost)          sec=baselines;  key=n_trials ;;
         NeuralNetwork)    sec=baselines;  key=nn_n_trials ;;
         *)                echo ""; return ;;
@@ -103,12 +105,14 @@ _finished_trials() {
 }
 
 _kind_of() {
-    case $1 in LSTM|Transformer) echo timeseries ;; *) echo baselines ;; esac
+    case $1 in LSTM|Transformer) echo timeseries ;; CNN-LSTM|CNN-Transformer) echo cnnseq ;; *) echo baselines ;; esac
 }
 _study_of() {   # study name for model $1 on stem $2 ('' = untuned, no study)
     case $1 in
         LSTM)            echo "LSTM_$2" ;;
         Transformer)     echo "Transformer_$2" ;;
+        CNN-LSTM)        echo "CNN-LSTM_$2" ;;
+        CNN-Transformer) echo "CNN-Transformer_$2" ;;
         XGBoost)         echo "baseline_xgb_$2" ;;
         NeuralNetwork)   echo "baseline_nn_$2" ;;
         IsolationForest) echo "" ;;
@@ -118,6 +122,8 @@ _submit_of() {  # script + args resubmitting model $1 for dataset $2
     case $1 in
         LSTM)            echo "slurm/train_lstm.slurm $2 lstm" ;;
         Transformer)     echo "slurm/train_lstm.slurm $2 transformer" ;;
+        CNN-LSTM)        echo "slurm/train_cnn_seq.slurm $2 lstm" ;;
+        CNN-Transformer) echo "slurm/train_cnn_seq.slurm $2 transformer" ;;
         XGBoost)         echo "slurm/train_baseline.slurm $2 xgboost" ;;
         NeuralNetwork)   echo "slurm/train_baseline_nn.slurm $2" ;;
         IsolationForest) echo "slurm/train_baseline.slurm $2 iforest" ;;

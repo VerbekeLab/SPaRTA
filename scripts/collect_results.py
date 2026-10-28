@@ -1,12 +1,13 @@
 # Aggregate every model's metrics into one tidy long-format table for the
 # "effect of timing parameters" analysis. Walks results/experiments/ for metric dumps from
-# experiment_LSTM.py / experiment_baseline.py / experiment_features.py / experiment_CNN.py
+# experiment_LSTM.py / experiment_CNN_LSTM.py / experiment_baseline.py / experiment_features.py / experiment_CNN.py
 # and writes results/experiments/summary.csv with one row per (dataset, run_tag, K, task, model).
 #
 # Run from the repo root: python scripts/collect_results.py
 #
 # Filename conventions parsed (set by the experiment scripts):
-#   dynamic:  {type}_{tag}_K{K}_{task}_{timeseries|baselines}.txt   (write_metrics blocks)
+#   dynamic:  {type}_{tag}_K{K}_{task}_{timeseries|cnnseq|baselines}.txt   (write_metrics blocks;
+#             cnnseq = the CNN->LSTM/Transformer models of experiment_CNN_LSTM.py)
 #   static:   {type}_features_{LogisticRegression|XGBoost|NN}.txt   (single-model dump)
 #   CNN:      {type}_CNN.txt                                        (write_metrics block, test split)
 # where tag matches <g><step>_(echo<days>|w<width>) with g the time_type initial
@@ -34,7 +35,7 @@ OUT_PATH = os.path.join(EXP_DIR, "summary.csv")
 # from the 'Model:' blocks inside.
 DYNAMIC_RE = re.compile(
     r"^(?P<type>.+?)_(?P<tag>[a-z]\d+_(?:echo\d+|w\d+))_K(?P<K>\d+)_"
-    r"(?P<task>nowcast|forecast)_(?P<kind>timeseries|baselines)"
+    r"(?P<task>nowcast|forecast)_(?P<kind>timeseries|cnnseq|baselines)"
     r"(?:_(?P<models>[A-Za-z][A-Za-z-]*))?\.txt$"
 )
 STATIC_RE = re.compile(

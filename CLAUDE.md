@@ -61,7 +61,7 @@ time-windowed (snapshot) construction with optional exponential time-decay ("ech
   renders 224×224 RGB PNGs of each node's 2-hop subgraph via igraph + cairo, packs
   bits, and writes batched `.pkl` + `.h5` to `results/pickle/`.
 - **Model definitions** — [src/methods/models.py](src/methods/models.py)
-  (`NeuralNetwork`, `CNN`, `CNN_time`, `CNN_visual_VGG16`).
+  (`NeuralNetwork`, `CNN`, `CNN_time`, `CNN_visual_VGG16`, `LSTMClassifier`, `TransformerClassifier`, `FrameEncoder`, `CNNSequenceClassifier`).
 - **Training entry points** — [scripts/experiment_features.py](scripts/experiment_features.py)
   (LogReg + XGBoost grid search + NN on the 3×3 features),
   [scripts/experiment_CNN.py](scripts/experiment_CNN.py) (CNN over the 3×3 pictures
@@ -69,11 +69,17 @@ time-windowed (snapshot) construction with optional exponential time-decay ("ech
   (VGG16 over the 224×224 rendered network images),
   [scripts/experiment_LSTM.py](scripts/experiment_LSTM.py) (LSTM + Transformer over
   K-snapshot windows with Optuna HPO; sequence models only),
+  [scripts/experiment_CNN_LSTM.py](scripts/experiment_CNN_LSTM.py) (the paper's architecture:
+  a shared per-frame CNN `FrameEncoder` embeds each 3×3×10 snapshot, then the same LSTM /
+  Transformer body reads the K embeddings — `CNNSequenceClassifier` in `models.py`; same
+  windows/split/losses/Optuna protocol as `experiment_LSTM.py`, whose flat-input models are its
+  ablation; shared training loop in [src/methods/sequence_training.py](src/methods/sequence_training.py);
+  outputs `*_cnnseq*.txt`, studies `CNN-LSTM_*`/`CNN-Transformer_*`, config block `cnn_seq`),
   [scripts/experiment_baseline.py](scripts/experiment_baseline.py) (non-sequential
   baselines — tuned XGBoost, a tuned feed-forward MLP (standardised inputs, mini-batch +
   early stopping), and unsupervised IsolationForest — on the **same** K-snapshot windows
   the sequence experiment uses, so the two are directly comparable).
-  `experiment_CNN_LSTM.py` and `src/data/utils/synthetic.py` are empty placeholders to
+  `src/data/utils/synthetic.py` is an empty placeholder to
   be implemented — fill them in following the patterns of the populated siblings; don't delete.
 - **Configs** — [config/data/config.yaml](config/data/config.yaml) selects the active
   `dataset` and toggles `time_dynamic` / `echo`;

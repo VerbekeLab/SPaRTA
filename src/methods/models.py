@@ -204,3 +204,49 @@ class TransformerClassifier(nn.Module):
         m = mask.float().unsqueeze(-1)
         h = (h * m).sum(1) / m.sum(1).clamp(min=1)        # mean-pool over valid tokens
         return self.head(self.drop(h)).squeeze(-1)
+
+class FrameEncoder(nn.Module):
+    """Per-frame CNN: one (C, 3, 3) SPaRTA picture -> an `emb_dim` embedding.
+
+    Conv stack (kernel 2-3, padding='same', ReLU) keeps the 3x3 grid, then the flattened
+    feature map goes through one linear layer to the embedding. The same weights are applied
+    to every time step (a TimeDistributed CNN), so the sequence model sees one embedding per
+    snapshot. `C = n_features // 9` (10 for the 90-feature layout: density, size and the eight
+    transaction-summary channels, each a row-major 3x3 grid)."""
+    def __init__(self, n_features=90, hidden_channels=16, num_layers=2, kernel_size=3,
+                 emb_dim=32):
+        super().__init__()
+        if n_features % 9:
+            raise ValueError(f"n_features={n_features} is not a whole number of 3x3 channels")
+        self.n_channels = n_features // 9
+        layers, c_in = [], self.n_channels
+        for _ in range(num_layers):
+            layers += [nn.Conv2d(c_in, hidden_channels, kernel_size, padding='same'), nn.ReLU()]
+            c_in = hidden_channels
+        self.conv = nn.Sequential(*layers)
+        self.fc = nn.Linear(hidden_channels * 3 * 3, emb_dim)
+
+    def forward(self, x):                        # x:(N, C*9) flat frames
+        x = x.view(-1, self.n_channels, 3, 3)
+        x = self.conv(x)
+        return F.relu(self.fc(torch.flatten(x, 1)))
+
+
+class CNNSequenceClassifier(nn.Module):
+    """SPaRTA architecture: per-frame CNN embeddings -> sequence model -> linear head.
+
+    `body` is an LSTMClassifier / TransformerClassifier built with n_features=emb_dim, so the
+    padding/masking behaviour (last valid step for the LSTM, masked mean-pool for the
+    Transformer) is exactly that of the flat models. Only VALID frames go through the CNN;
+    padded steps get an all-zero embedding, mirroring the zero input the flat models see."""
+    def __init__(self, encoder, body, emb_dim):
+        super().__init__()
+        self.encoder = encoder
+        self.body = body
+        self.emb_dim = emb_dim
+
+    def forward(self, x, mask):                  # x:(B,T,F)  mask:(B,T) bool
+        B, T, _ = x.shape
+        z = x.new_zeros(B, T, self.emb_dim)
+        z[mask] = self.encoder(x[mask])
+        return self.body(z, mask)

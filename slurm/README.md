@@ -51,7 +51,7 @@ grid itself stays in lockstep — only the `#SBATCH --array=` line is hand-kept)
 
 - `extract_features_dynamic.slurm`: `0-3` (timing combos)
 - `build_windows.slurm`: `0-3` (timing combos — K/task are free re-slices of one store)
-- `train_lstm.slurm` / `train_baseline.slurm` / `train_baseline_nn.slurm`: `0-23` (timing × K × task)
+- `train_lstm.slurm` / `train_cnn_seq.slurm` / `train_baseline.slurm` / `train_baseline_nn.slurm`: `0-23` (timing × K × task)
 - `extract_features.slurm`, `train_features.slurm`, `train_cnn.slurm`: no array (one job = one dataset)
 
 ## What depends on what
@@ -68,6 +68,10 @@ grid itself stays in lockstep — only the `#SBATCH --array=` line is hand-kept)
   sequentially by default; pass `lstm` or `transformer` as a 2nd arg (or set
   `SPARTA_SEQ_MODELS`) to fan them into separate concurrent tasks instead — see that
   script's header.
+  `train_cnn_seq.slurm` (`experiment_CNN_LSTM.py`) runs the SPaRTA architecture — a per-frame CNN
+  embedding feeding the same LSTM / Transformer — on identical windows and protocol; its per-arch
+  fan-out (`lstm` / `transformer`, or `SPARTA_CNN_SEQ_MODELS`) is recommended since trials are slower
+  than the flat models'.
 - **Stage 1.5, `build_windows.slurm`** sits between them. The stacked snapshot block a
   window build needs depends on the **tag alone**, not on K or the task, so it is built once
   per tag (4 CPU tasks) into a prebuilt *window store* (`src/data/window_store.py`); each of
@@ -99,6 +103,7 @@ sbatch --dependency=afterok:$EXTRACT_STATIC slurm/train_features.slurm $DS    # 
 sbatch --dependency=afterok:$EXTRACT_STATIC slurm/train_cnn.slurm $DS         # 1 task   (GPU)
 #    Dynamic models depend on the WINDOW STORE (which already depends on the extraction):
 LSTM=$(sbatch --parsable --dependency=afterok:$WINDOWS slurm/train_lstm.slurm $DS)        # 24 (GPU)
+CNNSEQ=$(sbatch --parsable --dependency=afterok:$WINDOWS slurm/train_cnn_seq.slurm $DS)    # 24 (GPU: CNN->LSTM/Transformer)
 BASE=$(sbatch --parsable --dependency=afterok:$WINDOWS slurm/train_baseline.slurm $DS)    # 24 (CPU: XGBoost + IsolationForest)
 BASE_NN=$(sbatch --parsable --dependency=afterok:$WINDOWS slurm/train_baseline_nn.slurm $DS) # 24 (GPU: MLP)
 ```
