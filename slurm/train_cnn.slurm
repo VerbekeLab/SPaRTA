@@ -35,7 +35,7 @@ source activate SPaRTA_env
 # against a 24h wall; against this 6h one it would spend half the job not starting trials, so
 # it is 2h — still enough for a worst-case trial started at the cutoff to finish inside the
 # wall. The study resumes from its SQLite on resubmit, so each round tops the trial count up.
-export SPARTA_WALL_MARGIN_S=7200
+export SPARTA_WALL_MARGIN_S=${SPARTA_WALL_MARGIN_S:-7200}   # override per submission, e.g. with a shorter --time
 
 # Dataset from the submission argument (or SPARTA_DATASET via --export).
 source slurm/sweep_common.sh

@@ -72,7 +72,7 @@ export MKL_NUM_THREADS=$SLURM_CPUS_PER_TASK
 # job 62378415 were killed mid-refit. NOTE this job tunes BOTH architectures in 6h by default —
 # if that is tight, fan them out into separate tasks (`sbatch slurm/train_lstm.slurm <Dataset>
 # lstm`, then `transformer`) rather than raising the wall. Studies resume from SQLite on resubmit.
-export SPARTA_WALL_MARGIN_S=3600
+export SPARTA_WALL_MARGIN_S=${SPARTA_WALL_MARGIN_S:-3600}   # override per submission, e.g. with a shorter --time
 
 # Dataset from the submission argument; (timing x K x task) from the array index.
 source slurm/sweep_common.sh

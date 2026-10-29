@@ -140,6 +140,30 @@ sbatch --mem=20G --time=04:00:00 --array=0-22:2%4 slurm/train_baseline_nn.slurm 
 sbatch                           --array=1-23:2%4 slurm/train_baseline_nn.slurm $DS  # forecast
 ```
 
+**Keep the GPUs busy: pack cells with `pack_gpu.slurm`.** The training cells are single-process,
+launch-bound loops that use a small share of an A100 (VSC flagged one at 5% utilisation / 6 GB
+VRAM and blocks accounts that keep doing this), so one cell per GPU is wasteful — and a bigger
+GPU (H100) only makes the share smaller. `pack_gpu.slurm` holds ONE GPU and runs `PACK` (default
+4) cells concurrently by running the unchanged inner script once per cell:
+
+```bash
+sbatch --array=0-5 slurm/pack_gpu.slurm slurm/train_lstm.slurm    $DS lstm          # 24 cells / 4
+sbatch --array=0-5 slurm/pack_gpu.slurm slurm/train_cnn_seq.slurm $DS transformer
+# nowcast-only baseline MLP (small, ~12 GB each): all EVEN cells, 4 per job
+sbatch --array=0-2 --mem=64G --export=ALL,PACK_CELLS=0,2,4,6,8,10,12,14,16,18,20,22 \
+       slurm/pack_gpu.slurm slurm/train_baseline_nn.slurm $DS
+```
+
+Validate before the full sweep: submit ONE pack task (`--array=0`, optionally
+`--partition=gpu_a100_debug --time=00:40:00`) and read the last lines of its `.out`: it prints
+the GPU's mean/max utilisation and peak VRAM (also sampled in `slurm/logs/gpu_<jobid>.csv`). If
+the mean is still low, raise `PACK`/`--cpus-per-task`/`--mem` together. All packed cells share the
+job's wall time, so each does fewer trials per job; resubmit top-ups via `missing_runs.sh`.
+The `pack_gpu.slurm` header lists the knobs and sizing (forecast baseline-MLP cells need ~53 GB
+each — pack at most 2). The conda env's PyTorch (2.9.1+cu128) has kernels for sm_70+ only, so
+P100s (sm_60) cannot be used; V100/A100/H100 can. To let pending wice jobs start on whichever of
+A100/H100 frees first: `scontrol update -M wice JobId=<id> Partition=gpu_a100,gpu_h100`.
+
 **Wall times are capped at 6 h** across every script (queue priority; the old 24 h requests
 were also what the VSC resource-usage warnings flagged). The Optuna jobs absorb that fine —
 each study persists to SQLite, stops starting trials `SPARTA_WALL_MARGIN_S` before the kill,
