@@ -17,6 +17,7 @@ env/
 /data/
 /res/
 /results/
+/results-old/
 
 # Slurm job logs (job outputs land there on the cluster; local copies for debugging)
 slurm/logs/
@@ -35,3 +36,6 @@ src/data/pictures/
 # Local-only context notes for Claude (not for the public repo)
 /PAPER_CONTEXT.md
 /optuna_xgboost.txt
+
+# Local text folder (not for the public repo)
+/text/
