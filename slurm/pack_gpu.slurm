@@ -27,7 +27,7 @@
 #
 # Sizing (override on the sbatch line; --mem/--cpus-per-task are split across the PACK cells):
 #  - train_lstm / train_cnn_seq: a cell peaks under ~10 GB host RAM and ~6 GB of VRAM, so the
-#    defaults below (96G, 16 cores, PACK=4) leave headroom and stay inside one GPU's share of a
+#    defaults below (64G, 16 cores, PACK=4) leave headroom and stay inside one GPU's share of a
 #    wice node (123G -> 18 cores on gpu_a100).
 #  - train_baseline_nn: NOWCAST cells ~12 GB each -> PACK=4 with --mem=64G is fine. FORECAST
 #    cells peak ~53 GB (a dense [rows, K*90] matrix) -> do NOT pack more than 2 of them
@@ -48,7 +48,10 @@
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=16
-#SBATCH --mem=96G
+# MEASURED (job 62462895, 4 x CNN-LSTM AMLWorld cells K=7/13, gpu_a100_debug): GPU util 95%
+# mean / 100% max, 22 GB VRAM, 20 GiB node RAM -> PACK=4 saturates the GPU. 64G leaves room for
+# the K=17 forecast cells (~10 GB each) that test did not include.
+#SBATCH --mem=64G
 #SBATCH --gpus-per-node=1
 
 #SBATCH --clusters=wice
@@ -105,6 +108,18 @@ nvidia-smi --query-gpu=utilization.gpu,memory.used --format=csv,noheader,nounits
     > "$GPU_LOG" 2>/dev/null &
 MON=$!
 
+# Print the GPU summary on a clean finish AND when Slurm kills the job at its wall time
+# (SIGTERM first), so a timed-out validation run still reports its utilisation.
+summarise() {
+    kill "$MON" 2>/dev/null
+    wait "$MON" 2>/dev/null
+    if [[ -s "$GPU_LOG" ]]; then
+        awk -F, '{u+=$1; if ($1>mu) mu=$1; if ($2>mm) mm=$2; n++}
+                 END {printf "GPU utilisation over %d samples: mean %.0f%%, max %d%%, peak VRAM %d MiB\n", n, u/n, mu, mm}' "$GPU_LOG"
+    fi
+}
+trap 'echo "[$(date)] SIGTERM (wall time reached)" >&2; summarise; exit 143' TERM
+
 echo "[$(date)] pack task ${SLURM_ARRAY_TASK_ID:-0}: $INNER $DS $* | cells: ${MINE[*]} |" \
      "$PER_CPUS cores/cell | $(nvidia-smi -L 2>/dev/null | head -1)"
 
@@ -130,12 +145,7 @@ for i in "${!pids[@]}"; do
     fi
 done
 
-kill "$MON" 2>/dev/null
-wait "$MON" 2>/dev/null
-if [[ -s "$GPU_LOG" ]]; then
-    awk -F, '{u+=$1; if ($1>mu) mu=$1; if ($2>mm) mm=$2; n++}
-             END {printf "GPU utilisation over %d samples: mean %.0f%%, max %d%%, peak VRAM %d MiB\n", n, u/n, mu, mm}' "$GPU_LOG"
-fi
+summarise
 
 echo finish
 exit $rc
