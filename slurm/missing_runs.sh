@@ -26,6 +26,10 @@
 #   CNN-LSTM / CNN-Transformer       -> train_cnn_seq.slurm <Dataset> lstm|transformer
 #   XGBoost / IsolationForest        -> train_baseline.slurm <Dataset> xgboost|iforest
 #   NeuralNetwork (MLP)              -> train_baseline_nn.slurm <Dataset>
+#   Local-XGBoost / Local-IsolationForest -> train_local.slurm <Dataset> xgboost|iforest
+#   Local-NeuralNetwork              -> train_local_nn.slurm <Dataset>
+# The Local-* models (SPARTA_BASELINE_VIEW=local) are forecast-only, so only the ODD cells are
+# audited for them; their dumps are {stem}_local*.txt with plain 'Model: XGBoost' blocks.
 #
 # Usage (repo root, on the machine that holds results/ — i.e. the cluster):
 #   bash slurm/missing_runs.sh                # all datasets
@@ -43,7 +47,8 @@ shopt -s nullglob
 
 source slurm/sweep_common.sh
 
-MODELS="LSTM Transformer CNN-LSTM CNN-Transformer XGBoost NeuralNetwork IsolationForest"
+MODELS="LSTM Transformer CNN-LSTM CNN-Transformer XGBoost NeuralNetwork IsolationForest
+        Local-XGBoost Local-NeuralNetwork Local-IsolationForest"
 TOTAL=$((N_TIMING * N_K * N_TASK))
 
 # Reading a study's trial count needs the sqlite3 CLI; without it every tuned cell that has a
@@ -87,8 +92,8 @@ _budget_of() {
     case $1 in
         LSTM|Transformer) sec=timeseries; key=n_trials ;;
         CNN-LSTM|CNN-Transformer) sec=cnn_seq; key=n_trials ;;
-        XGBoost)          sec=baselines;  key=n_trials ;;
-        NeuralNetwork)    sec=baselines;  key=nn_n_trials ;;
+        XGBoost|Local-XGBoost)             sec=baselines;  key=n_trials ;;
+        NeuralNetwork|Local-NeuralNetwork) sec=baselines;  key=nn_n_trials ;;
         *)                echo ""; return ;;
     esac
     v=$(_cfg_field "$2" "$sec" "$key")
@@ -105,7 +110,8 @@ _finished_trials() {
 }
 
 _kind_of() {
-    case $1 in LSTM|Transformer) echo timeseries ;; CNN-LSTM|CNN-Transformer) echo cnnseq ;; *) echo baselines ;; esac
+    case $1 in LSTM|Transformer) echo timeseries ;; CNN-LSTM|CNN-Transformer) echo cnnseq ;;
+               Local-*) echo local ;; *) echo baselines ;; esac
 }
 _study_of() {   # study name for model $1 on stem $2 ('' = untuned, no study)
     case $1 in
@@ -115,7 +121,9 @@ _study_of() {   # study name for model $1 on stem $2 ('' = untuned, no study)
         CNN-Transformer) echo "CNN-Transformer_$2" ;;
         XGBoost)         echo "baseline_xgb_$2" ;;
         NeuralNetwork)   echo "baseline_nn_$2" ;;
-        IsolationForest) echo "" ;;
+        Local-XGBoost)       echo "local_xgb_$2" ;;
+        Local-NeuralNetwork) echo "local_nn_$2" ;;
+        IsolationForest|Local-IsolationForest) echo "" ;;
     esac
 }
 _submit_of() {  # script + args resubmitting model $1 for dataset $2
@@ -127,6 +135,9 @@ _submit_of() {  # script + args resubmitting model $1 for dataset $2
         XGBoost)         echo "slurm/train_baseline.slurm $2 xgboost" ;;
         NeuralNetwork)   echo "slurm/train_baseline_nn.slurm $2" ;;
         IsolationForest) echo "slurm/train_baseline.slurm $2 iforest" ;;
+        Local-XGBoost)         echo "slurm/train_local.slurm $2 xgboost" ;;
+        Local-NeuralNetwork)   echo "slurm/train_local_nn.slurm $2" ;;
+        Local-IsolationForest) echo "slurm/train_local.slurm $2 iforest" ;;
     esac
 }
 _sorted() { printf '%s\n' $(printf '%s' "$1" | tr ',' ' ') | sort -n | paste -sd, -; }
@@ -149,10 +160,12 @@ for ds in "${datasets[@]}"; do
         miss="" topup="" unknown=""
         for ((i = 0; i < TOTAL; i++)); do
             decode_train "$i"
+            # Local-* are forecast-only (the nowcast window baseline already is the local view).
+            [[ $model == Local-* && $SPARTA_TASK == nowcast ]] && continue
             stem="${type}_${SPARTA_RUN_TAG}_K${SPARTA_K}_${SPARTA_TASK}"
             found=0
             for f in "results/experiments/${stem}_${kind}"*.txt; do
-                if grep -qs "^Model: ${model}\$" "$f"; then found=1; break; fi
+                if grep -qs "^Model: ${model#Local-}\$" "$f"; then found=1; break; fi
             done
             if [ "$found" -eq 0 ]; then
                 miss="${miss},$i"
@@ -178,11 +191,11 @@ for ds in "${datasets[@]}"; do
         done
         miss="${miss#,}" topup="${topup#,}" unknown="${unknown#,}"
         if [ -z "$miss" ] && [ -z "$topup" ] && [ -z "$unknown" ]; then
-            printf '  %-16s complete\n' "$model"
+            printf '  %-21s complete\n' "$model"
             continue
         fi
         gaps=1
-        printf '  %-16s missing: %-24s top-up: %-16s unknown?: %s\n' \
+        printf '  %-21s missing: %-24s top-up: %-16s unknown?: %s\n' \
             "$model" "${miss:-—}" "${topup:-—}" "${unknown:-—}"
         rerun=$(_sorted "${miss}${miss:+${topup:+,}}${topup}")
         if [ -n "$rerun" ]; then

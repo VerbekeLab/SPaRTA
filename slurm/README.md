@@ -52,6 +52,7 @@ grid itself stays in lockstep — only the `#SBATCH --array=` line is hand-kept)
 - `extract_features_dynamic.slurm`: `0-3` (timing combos)
 - `build_windows.slurm`: `0-3` (timing combos — K/task are free re-slices of one store)
 - `train_lstm.slurm` / `train_cnn_seq.slurm` / `train_baseline.slurm` / `train_baseline_nn.slurm`: `0-23` (timing × K × task)
+- `train_local.slurm` / `train_local_nn.slurm`: `1-23:2` (the forecast half of the same grid)
 - `extract_features.slurm`, `train_features.slurm`, `train_cnn.slurm`: no array (one job = one dataset)
 
 ## What depends on what
@@ -72,6 +73,12 @@ grid itself stays in lockstep — only the `#SBATCH --array=` line is hand-kept)
   embedding feeding the same LSTM / Transformer — on identical windows and protocol; its per-arch
   fan-out (`lstm` / `transformer`, or `SPARTA_CNN_SEQ_MODELS`) is recommended since trials are slower
   than the flat models'.
+  `train_local.slurm` (CPU: XGBoost + IsolationForest) / `train_local_nn.slurm` (GPU: MLP) run the
+  **local view** — `experiment_baseline.py` with `SPARTA_BASELINE_VIEW=local`: the same rows and
+  split as each window cell, but only the last window step's 90 features. Forecast-only, because
+  the nowcast window baseline already reads just the anchor snapshot (it *is* the local nowcast);
+  hence `--array=1-23:2`, the odd = forecast cells. Separate `local_*` studies and `*_local*.txt`
+  dumps, so it never resumes or overwrites the window baseline's.
 - **Stage 1.5, `build_windows.slurm`** sits between them. The stacked snapshot block a
   window build needs depends on the **tag alone**, not on K or the task, so it is built once
   per tag (4 CPU tasks) into a prebuilt *window store* (`src/data/window_store.py`); each of
@@ -106,6 +113,8 @@ LSTM=$(sbatch --parsable --dependency=afterok:$WINDOWS slurm/train_lstm.slurm $D
 CNNSEQ=$(sbatch --parsable --dependency=afterok:$WINDOWS slurm/train_cnn_seq.slurm $DS)    # 24 (GPU: CNN->LSTM/Transformer)
 BASE=$(sbatch --parsable --dependency=afterok:$WINDOWS slurm/train_baseline.slurm $DS)    # 24 (CPU: XGBoost + IsolationForest)
 BASE_NN=$(sbatch --parsable --dependency=afterok:$WINDOWS slurm/train_baseline_nn.slurm $DS) # 24 (GPU: MLP)
+LOCAL=$(sbatch --parsable --dependency=afterok:$WINDOWS slurm/train_local.slurm $DS)      # 12 (CPU: local XGBoost + IForest, forecast)
+LOCAL_NN=$(sbatch --parsable --dependency=afterok:$WINDOWS slurm/train_local_nn.slurm $DS) # 12 (GPU: local MLP, forecast)
 ```
 
 Once the training jobs of **all datasets you care about** have finished, aggregate
@@ -236,7 +245,7 @@ VGG16 writes only a model file (no metrics dump), so it does **not** appear in `
   features (`_w` combos drop the `_echo` suffix; readers also accept legacy `.csv`).
 - `results/features/{type}_static_features.parquet` — static features (flat, shared).
 - `results/timeseries/<tag>/…npz` — per-combo windowed cache (the tag kills the stale-cache bug).
-- `results/experiments/{type}_{tag}_K{K}_{task}_{timeseries|baselines}.txt|.png` — per-combo metrics.
+- `results/experiments/{type}_{tag}_K{K}_{task}_{timeseries|cnnseq|baselines|local}.txt|.png` — per-combo metrics.
 - `results/experiments/{type}_CNN.txt|.png` — static CNN test metrics (timing-independent).
 - `results/tuning/…_best_params.json` — best HPs (+ val AUC-PR where tuned) per combo / model.
 - `results/models/{LSTM|Transformer}_{type}_{tag}_K{K}_{task}.pt`, `results/models/CNN_{type}.pt` —

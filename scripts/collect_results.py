@@ -6,8 +6,10 @@
 # Run from the repo root: python scripts/collect_results.py
 #
 # Filename conventions parsed (set by the experiment scripts):
-#   dynamic:  {type}_{tag}_K{K}_{task}_{timeseries|cnnseq|baselines}.txt   (write_metrics blocks;
-#             cnnseq = the CNN->LSTM/Transformer models of experiment_CNN_LSTM.py)
+#   dynamic:  {type}_{tag}_K{K}_{task}_{timeseries|cnnseq|baselines|local}.txt   (write_metrics
+#             blocks; cnnseq = the CNN->LSTM/Transformer models of experiment_CNN_LSTM.py;
+#             local = experiment_baseline.py's SPARTA_BASELINE_VIEW=local, whose models are
+#             prefixed "Local " so they don't collide with the window baselines')
 #   static:   {type}_features_{LogisticRegression|XGBoost|NN}.txt   (single-model dump)
 #   CNN:      {type}_CNN.txt                                        (write_metrics block, test split)
 # where tag matches <g><step>_(echo<days>|w<width>) with g the time_type initial
@@ -35,7 +37,7 @@ OUT_PATH = os.path.join(EXP_DIR, "summary.csv")
 # from the 'Model:' blocks inside.
 DYNAMIC_RE = re.compile(
     r"^(?P<type>.+?)_(?P<tag>[a-z]\d+_(?:echo\d+|w\d+))_K(?P<K>\d+)_"
-    r"(?P<task>nowcast|forecast)_(?P<kind>timeseries|cnnseq|baselines)"
+    r"(?P<task>nowcast|forecast)_(?P<kind>timeseries|cnnseq|baselines|local)"
     r"(?:_(?P<models>[A-Za-z][A-Za-z-]*))?\.txt$"
 )
 STATIC_RE = re.compile(
@@ -82,9 +84,10 @@ def collect():
         m = DYNAMIC_RE.match(fname)
         if m:
             # LSTM/baseline: multi-model write_metrics dump, scored on the test band.
+            prefix = "Local " if m["kind"] == "local" else ""
             for model, (pr, roc) in parse_write_metrics(text).items():
                 rows.append(dict(dataset=m["type"], run_tag=m["tag"], K=int(m["K"]),
-                                 task=m["task"], model=model, split="test",
+                                 task=m["task"], model=prefix + model, split="test",
                                  AUC_PR=pr, AUC_ROC=roc))
             continue
 

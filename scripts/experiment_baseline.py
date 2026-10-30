@@ -4,6 +4,13 @@
 # models so baselines and sequence experiments can evolve independently and so new
 # (non-baseline, non-sequential) methods can slot in beside them. Minimalist style;
 # self-contained.
+#
+# SPARTA_BASELINE_VIEW=local runs the same three models as a LOCAL view: the SAME rows and
+# temporal split as the window cell, but only the final window step's 90 features (snapshot
+# a-1 for forecast) instead of all K. A per-cell ablation of "K snapshots vs the last one".
+# Nowcast is excluded: its window baseline already reads only the anchor step, so a local
+# nowcast run would reproduce it bit-for-bit. Outputs go to their own *_local stem and
+# local_* Optuna studies, so they never resume or overwrite the window baseline's.
 import os
 import sys
 DIR = "./"
@@ -196,7 +203,7 @@ def run_iforest_baseline(Xtr2d, Xte2d, params=None, seed=SEED):
     return -clf.score_samples(Xte2d)
 
 
-def _xgb_arrays(values, band_idx, K, task):
+def _xgb_arrays(values, band_idx, K, task, local=False):
     """Per-task 2D feature array for ONE band, gathered straight from the compact
     (values, idx) form — the dense [N, K, 90] window tensor is never materialised.
     nowcast  -> anchor step (K-1) only, 90 feats.
@@ -204,6 +211,8 @@ def _xgb_arrays(values, band_idx, K, task):
     already excludes the anchor (builder offsets base=a-K), so every step is history;
     the baselines must see the same K-step history the sequence models do — slicing it
     shorter would silently handicap them and confound the sequential-vs-not comparison.
+    local    -> last window step (K-1) only, 90 feats, for either task: the deliberate
+    single-snapshot ablation (SPARTA_BASELINE_VIEW=local), not the window baseline.
 
     `band_idx` is this band's [n, K] slice of idx. Absent steps (-1) read as 0.0, matching
     _expand_windows. Nowcast gathers ONE column, so it allocates n x 90 instead of the
@@ -211,7 +220,7 @@ def _xgb_arrays(values, band_idx, K, task):
     real dense 2D matrix (XGBoost's DMatrix, sklearn), but only for this band — the old flow
     built the full-population tensor first and copied each band out of it, roughly doubling
     the peak."""
-    if task == "nowcast":
+    if task == "nowcast" or local:
         col = band_idx[:, K - 1]
         out = values[np.maximum(col, 0)]
         out[col < 0] = 0.0
@@ -281,6 +290,19 @@ if __name__ == "__main__":
         # Keep canonical order regardless of how the user listed them.
         selected = [m for m in ALL_MODELS if m in chosen]
 
+    # window (default) = the K-step baselines; local = last window step only (see header).
+    view = os.environ.get("SPARTA_BASELINE_VIEW", "window").strip().lower()
+    if view not in ("window", "local"):
+        raise SystemExit(f"Unknown SPARTA_BASELINE_VIEW {view!r}; expected 'window' or 'local'.")
+    local = view == "local"
+    if local and task == "nowcast":
+        raise SystemExit(
+            "SPARTA_BASELINE_VIEW=local is forecast-only: the nowcast window baseline already "
+            "uses only the anchor snapshot, so it IS the local nowcast. Submit the ODD (forecast) "
+            "array indices only.")
+    kind = "local" if local else "baselines"           # metrics file kind (collect_results.py)
+    study_prefix = "local" if local else "baseline"    # Optuna study / .db name prefix
+
     # Per-combo stem for all outputs (tag already encodes echo + snapshot grid). When a strict
     # subset of models runs (fan-out mode), suffix the outputs by the selected models so the
     # concurrent per-model tasks never overwrite each other; collect_results.py parses both the
@@ -311,6 +333,8 @@ if __name__ == "__main__":
     # Drop all-masked rows per band (forecast no-history rows; nowcast anchor is
     # always valid). Mirrors experiment_LSTM.py so both consume the same node sets.
     # mask is just idx >= 0 in the compact form, so no dense mask array is needed.
+    # The local view keeps this K-step filter so it scores the SAME rows; a node absent at
+    # a-1 but present earlier in the window reads as an all-zero local snapshot.
     def _band(band):
         return band[(idx[band] >= 0).any(1)]
     train_idx, val_idx, test_idx = _band(train_idx), _band(val_idx), _band(test_idx)
@@ -319,12 +343,12 @@ if __name__ == "__main__":
     yval = y[val_idx]
     y_test = y[test_idx]
 
-    Xtr2d = _xgb_arrays(values, idx[train_idx], K, task)
-    Xval2d = _xgb_arrays(values, idx[val_idx], K, task)
-    Xte2d = _xgb_arrays(values, idx[test_idx], K, task)
+    Xtr2d = _xgb_arrays(values, idx[train_idx], K, task, local=local)
+    Xval2d = _xgb_arrays(values, idx[val_idx], K, task, local=local)
+    Xte2d = _xgb_arrays(values, idx[test_idx], K, task, local=local)
     n_rows_values = len(values)
     del values, idx    # the models read only the 2D band arrays above
-    print(f"Baselines {selected} | task={task} K={K} echo={echo} | "
+    print(f"Baselines {selected} ({view} view) | task={task} K={K} echo={echo} | "
           f"train {len(train_idx)} val {len(val_idx)} test {len(test_idx)} "
           f"| 2D feature dim = {Xtr2d.shape[1]} "
           f"| gathered from {n_rows_values:,} compact rows (no dense [N, K, F] tensor)")
@@ -337,7 +361,7 @@ if __name__ == "__main__":
 
     # --- XGBoost (supervised, tuned on the val band; native early stopping, resumable study).
     if "XGBoost" in selected:
-        xgb_study = f"baseline_xgb_{stem}"
+        xgb_study = f"{study_prefix}_xgb_{stem}"
         scores["XGBoost"], xgb_best, xgb_value = run_xgb_baseline(
             Xtr2d, ytr, Xval2d, yval, Xte2d, xgb_search_space, seed=SEED, n_trials=n_trials,
             study_name=xgb_study, storage=resolve_storage(bl_cfg, study_name=xgb_study),
@@ -346,7 +370,7 @@ if __name__ == "__main__":
 
     # --- Feed-forward MLP (supervised, tuned on the val band; standardised inputs; pruned + resumable).
     if "NeuralNetwork" in selected:
-        nn_study = f"baseline_nn_{stem}"
+        nn_study = f"{study_prefix}_nn_{stem}"
         scores["NeuralNetwork"], nn_best, nn_value = run_nn_baseline(
             Xtr2d, ytr, Xval2d, yval, Xte2d, nn_search_space, seed=SEED, n_trials=nn_n_trials,
             patience=patience, study_name=nn_study, storage=resolve_storage(bl_cfg, study_name=nn_study),
@@ -360,11 +384,11 @@ if __name__ == "__main__":
 
     # --- Persist best params, metrics, and the ROC/PR comparison figure. model_suffix is ""
     # for an all-models run (original filenames) and "_<models>" for a per-model fan-out task.
-    with open(f"results/tuning/baselines_{stem}{model_suffix}_best_params.json", "w") as f:
+    with open(f"results/tuning/{kind}_{stem}{model_suffix}_best_params.json", "w") as f:
         json.dump({"dataset": type_dataset, "run_tag": tag, "task": task, "K": K, "echo": echo,
-                   "models": best_params_all}, f, indent=2)
+                   "view": view, "models": best_params_all}, f, indent=2)
 
-    metrics_path = f"results/experiments/{stem}_baselines{model_suffix}.txt"
+    metrics_path = f"results/experiments/{stem}_{kind}{model_suffix}.txt"
     evaluation.write_metrics(metrics_path, scores, y_test)
     # Curve PNGs disabled: they only compare the models within this run (not across all
     # experiments) and the per-combo figures add up on VSC storage. The .txt metrics keep

@@ -78,7 +78,13 @@ time-windowed (snapshot) construction with optional exponential time-decay ("ech
   [scripts/experiment_baseline.py](scripts/experiment_baseline.py) (non-sequential
   baselines — tuned XGBoost, a tuned feed-forward MLP (standardised inputs, mini-batch +
   early stopping), and unsupervised IsolationForest — on the **same** K-snapshot windows
-  the sequence experiment uses, so the two are directly comparable).
+  the sequence experiment uses, so the two are directly comparable). Its input differs by task:
+  **nowcast reads only the anchor snapshot (90 feats), forecast flattens all K steps (K×90)**.
+  `SPARTA_BASELINE_VIEW=local` is the **local view**: the same rows/split per cell but only the
+  last window step, so it is forecast-only (the nowcast window baseline already is local) —
+  [slurm/train_local.slurm](slurm/train_local.slurm) / `train_local_nn.slurm`, `--array=1-23:2`;
+  outputs `*_local*.txt`, studies `local_xgb_*`/`local_nn_*`, same `baselines` config block;
+  `collect_results.py` names its models `Local <model>`.
   `src/data/utils/synthetic.py` is an empty placeholder to
   be implemented — fill them in following the patterns of the populated siblings; don't delete.
 - **Configs** — [config/data/config.yaml](config/data/config.yaml) selects the active
