@@ -19,7 +19,8 @@ from src.utils.setup import (load_config, resolve_dataset, resolve_timing,
                              resolve_sequence, run_tag,
                              resolve_storage, make_pruner,
                              resolve_ts_cache_dir,
-                             resolve_window_store_dir, require_prebuilt_windows)
+                             resolve_window_store_dir, require_prebuilt_windows,
+                             resolve_rescore)
 from src.data.sequence_data import (build_sequence_windows, temporal_split,
                                      fit_scaler_compact, apply_scaler_compact)
 from src.methods.models import LSTMClassifier, TransformerClassifier
@@ -108,6 +109,10 @@ if __name__ == "__main__":
     # selected archs so concurrent per-arch tasks never overwrite each other; collect_results.py's
     # DYNAMIC_RE already parses both the combined and per-arch names (same as the baselines).
     model_suffix = "" if selected == ALL_ARCHS else "_" + "-".join(selected)
+    # SPARTA_RESCORE=1: reload the saved .pt of each selected arch and only write
+    # results/predictions/<stem>_timeseries<suffix>.parquet (no Optuna, no training, metrics .txt
+    # untouched). See resolve_rescore.
+    rescore = resolve_rescore()
 
     # --- Build the windowed dataset (T derived from the dataset's snapshot grid).
     # features_dir + cache_dir are namespaced by `tag` so each timing combo reads its own
@@ -157,6 +162,7 @@ if __name__ == "__main__":
     val_bands = (to_idx(val_idx), to_y(val_idx))
     test_bands = (to_idx(test_idx), to_y(test_idx))
     y_test = y[test_idx]
+    test_anchors, test_nodes = np.asarray(anchors)[test_idx], np.asarray(nodes)[test_idx]
     del idx
 
     # Empirical pos_weight (neg/pos) on the train band — used for the bce loss.
@@ -183,6 +189,23 @@ if __name__ == "__main__":
              ("transformer", f"Transformer_{stem}", "Transformer")]
     archs = [a for a in archs if a[2] in selected]
     for arch, study_name, label in archs:
+        if rescore:
+            ckpt_path = f"results/models/{study_name}.pt"
+            if not os.path.exists(ckpt_path):
+                print(f"[rescore] {label}: no checkpoint at {ckpt_path} -- skipped")
+                continue
+            ckpt = torch.load(ckpt_path, map_location=device, weights_only=False)
+            # The scaler is refit from this cell's train band; it must equal the one the
+            # model was trained with, or the scores below would be for different inputs.
+            if not (np.allclose(ckpt["mu"], mu) and np.allclose(ckpt["sd"], sd)):
+                print(f"[rescore] {label}: WARNING scaler differs from checkpoint's -- "
+                      f"windows/split are not the ones this model was trained on")
+            model = make_model(arch, ckpt["best_params"], n_features)
+            model.load_state_dict(ckpt["state_dict"])
+            model.to(device)
+            scores[label] = predict(model, values_t, test_bands[0])
+            continue
+
         best_params, best_value = tune_arch(
             make_model, arch, study_name, resolve_storage(ts_cfg, study_name=study_name), n_trials,
             search_space, n_features, values_t, train_bands, val_bands, device, pos_weight,
@@ -203,6 +226,15 @@ if __name__ == "__main__":
              "arch": arch, "best_params": best_params, "K": K, "task": task},
             f"results/models/{study_name}.pt")
 
+    pred_path = f"{evaluation.PRED_DIR}/{stem}_timeseries{model_suffix}.parquet"
+    if rescore:
+        if not scores:
+            raise SystemExit("[rescore] nothing scored: no checkpoint found for the selected models")
+        evaluation.compare_to_metrics(f"results/experiments/{stem}_timeseries*.txt", scores, y_test)
+        evaluation.save_predictions(pred_path, scores, y_test, test_anchors, test_nodes)
+        print(f"Wrote predictions -> {pred_path}")
+        sys.exit(0)
+
     # --- Persist best params, metrics, and the ROC/PR comparison figure (per-combo stem).
     # model_suffix is "" for an all-archs run (original filenames) and "_<archs>" for a
     # per-arch fan-out task.
@@ -212,9 +244,10 @@ if __name__ == "__main__":
 
     metrics_path = f"results/experiments/{stem}_timeseries{model_suffix}.txt"
     evaluation.write_metrics(metrics_path, scores, y_test)
+    evaluation.save_predictions(pred_path, scores, y_test, test_anchors, test_nodes)
     # Curve PNGs disabled: they only compare the models within this run (not across all
-    # experiments) and the per-combo figures add up on VSC storage. The .txt metrics keep
-    # the ROC/PR arrays, so curves can still be re-plotted offline if ever needed.
+    # experiments) and the per-combo figures add up on VSC storage. The curves can be re-plotted
+    # offline from results/predictions/ (NOT from the .txt arrays, which numpy truncates with "...").
     # evaluation.plot_curves(
     #     scores, y_test,
     #     f"Time-series ({task}, {tag}) — {type_dataset} (n={len(y_test)}, {int(y_test.sum())} positive)",

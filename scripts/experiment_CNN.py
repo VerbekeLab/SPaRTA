@@ -24,7 +24,7 @@ from src.data.feature_data import ImageDataset
 from src.methods.models import CNN
 from src.methods import evaluation
 from src.utils.setup import (load_config, resolve_dataset, suggest_param,
-                             resolve_storage, make_pruner, optimize_study)
+                             resolve_storage, make_pruner, optimize_study, resolve_rescore)
 from src.utils.feature_io import load_table
 
 SEED = 1997
@@ -35,7 +35,7 @@ def load_data(features_stem, labels_stem):
     features_df = load_table(features_stem)
     labels_df = load_table(labels_stem)
     data = pd.merge(features_df, labels_df, left_on='node', right_on='Account')
-    data.drop(columns=['node', 'Account'], inplace=True)
+    data.drop(columns=['Account'], inplace=True)   # 'node' kept: ids of the test rows are saved
     return data
 
 
@@ -55,18 +55,22 @@ def predict(model, loader, device):
     return np.array(probs)
 
 
-def train_cnn(params, num_channels, loader_train, loader_val, y_train, y_val, device, trial=None):
-    """Train a CNN, tracking the best val-AUC-PR epoch and restoring those weights before
-    returning. num_epochs is itself tuned (no separate early-stop cap). Drives both the
-    Optuna objective (trial given) and the final fit (trial=None). Returns (model, best_val_aucpr)."""
-    model = CNN(
+def build_cnn(params, num_channels):
+    return CNN(
         num_channels=num_channels,
         hidden_channels=params['hidden_channels'],
         num_layers=params['num_layers'],
         kernel_size=params['kernel_size'],
         max_pool=params['max_pool'],
         half_final_layer=params['half_final_layer'],
-    ).to(device)
+    )
+
+
+def train_cnn(params, num_channels, loader_train, loader_val, y_train, y_val, device, trial=None):
+    """Train a CNN, tracking the best val-AUC-PR epoch and restoring those weights before
+    returning. num_epochs is itself tuned (no separate early-stop cap). Drives both the
+    Optuna objective (trial given) and the final fit (trial=None). Returns (model, best_val_aucpr)."""
+    model = build_cnn(params, num_channels).to(device)
 
     if params['scale_labels'] > 0:
         train_weight = round((y_train == 0).sum() / (y_train == 1).sum()) * params['scale_labels'] / 100
@@ -150,7 +154,7 @@ if __name__ == "__main__":
 
     data = load_data(os.path.join(data_directory, f"{type_dataset}_static_features"),
                      os.path.join(data_directory, f"{type_dataset}_static_labels"))
-    X = data.drop(columns=['is_laundering'])
+    X = data.drop(columns=['is_laundering', 'node'])
     y = data['is_laundering']
 
     # No time axis on the static network (one snapshot per node), so a stratified random
@@ -177,6 +181,28 @@ if __name__ == "__main__":
     # Per-study SQLite (resolve_storage templates the URL on study_name) so the study
     # resumes after a Slurm timeout; optimize_study tops it up to n_trials on resume.
     study_name = f"CNN_{type_dataset}"
+    node_test = data.loc[X_test.index, 'node'].to_numpy()
+    pred_path = f"{evaluation.PRED_DIR}/{type_dataset}_CNN.parquet"
+
+    # SPARTA_RESCORE=1: reload the saved checkpoint, write only results/predictions/ (no Optuna, no
+    # training, metrics .txt / plot untouched). The channel transform is refit from the (seeded,
+    # deterministic) train split and checked against the checkpoint's.
+    if resolve_rescore():
+        ckpt_path = f"results/models/{study_name}.pt"
+        if not os.path.exists(ckpt_path):
+            raise SystemExit(f"[rescore] no checkpoint at {ckpt_path}")
+        ckpt = torch.load(ckpt_path, map_location=device, weights_only=False)
+        if not (torch.allclose(torch.as_tensor(ckpt['mean']).cpu(), torch.as_tensor(transform.mean).cpu())
+                and torch.allclose(torch.as_tensor(ckpt['std']).cpu(), torch.as_tensor(transform.std).cpu())):
+            print('[rescore] CNN: WARNING channel transform differs from the checkpoint\'s')
+        model = build_cnn(ckpt['best_params'], num_channels).to(device)
+        model.load_state_dict(ckpt['state_dict'])
+        scores = {"CNN": predict(model, loader_test, device)}
+        evaluation.compare_to_metrics(f"results/experiments/{type_dataset}_CNN.txt", scores, y_test_np)
+        evaluation.save_predictions(pred_path, scores, y_test_np, nodes=node_test)
+        print(f"Wrote predictions -> {pred_path}")
+        sys.exit(0)
+
     best_params, best_value = _tune_cnn(
         study_name, resolve_storage(cnn_cfg, study_name=study_name), cnn_cfg['n_trials'],
         search_space, num_channels, loader_train, loader_val, y_train_np, y_val_np, device,
@@ -198,6 +224,7 @@ if __name__ == "__main__":
     scores = {"CNN": probs_test}
     metrics_path = f"results/experiments/{type_dataset}_CNN.txt"
     evaluation.write_metrics(metrics_path, scores, y_test_np)
+    evaluation.save_predictions(pred_path, scores, y_test_np, nodes=node_test)
     evaluation.plot_curves(
         scores, y_test_np,
         f"CNN — {type_dataset} (n={len(y_test_np)}, {int(y_test_np.sum())} positive)",

@@ -239,6 +239,40 @@ sbatch --dependency=afterok:$RENDER slurm/train_vgg16.slurm               # GPU,
 
 VGG16 writes only a model file (no metrics dump), so it does **not** appear in `summary.csv`.
 
+## Test-set predictions and re-scoring (extra metrics without retraining)
+
+Every experiment script now also writes `results/predictions/<same basename as the metrics .txt>.parquet`:
+`y_true`, `anchor`/`node` of each test row, and one `score_<model>` column per model. Any further
+metric (precision@k, recall@k, lift, F1 at a threshold, calibration, bootstrap CIs, paired tests
+between models) is then an offline calculation on those tables. The ROC/PR arrays in the metrics
+`.txt` files are **not** usable for this: numpy truncates them with `...` past 1000 elements.
+`python scripts/extra_metrics.py` turns the tables into `results/experiments/extra_metrics.csv` (same key
+columns as `summary.csv`): **F1@0.5** (fixed cut-off `score >= 0.5`; arbitrary for IsolationForest's
+anomaly scores), **best-F1** (max over thresholds on the test band, an oracle/optimistic operating
+point, not a deployable F1) with its threshold/precision/recall, and **precision@100** (`--ks`, `--fracs`,
+`--r-precision` add more). On VSC: `sbatch slurm/extra_metrics.slurm`.
+Static runs write one table per dataset (`{type}_features.parquet`, `{type}_CNN.parquet`).
+
+Cells finished **before** this existed are backfilled with `SPARTA_RESCORE=1`: the same job, same
+env, but no Optuna and no training. Sequence/CNN models reload their `.pt`; XGBoost / MLP are
+refit once from the stored `results/tuning/*_best_params.json`; IsolationForest is refit (fixed
+params). Metrics `.txt` / params JSON are left untouched, and the reproduced AUC-PR / AUC-ROC are
+printed next to the stored ones (`MATCH` / `DIFF`) as a check. `sbatch` forwards the env, so:
+
+```bash
+python scripts/missing_predictions.py --list                    # what still lacks a table
+SPARTA_RESCORE=1 sbatch --time=01:00:00 slurm/train_lstm.slurm AMLWorld lstm   # GPU, minutes
+SPARTA_RESCORE=1 sbatch --time=02:00:00 slurm/train_baseline.slurm AMLWorld xgboost
+```
+
+Use the **same fan-out selection** as the original run (the model argument /
+`SPARTA_*_MODELS`), because the predictions file takes the metrics file's suffix. The GPU scripts
+still need the window store (`SPARTA_REQUIRE_WINDOWS=1`). Expect exact matches for XGBoost,
+IsolationForest and reloaded checkpoints (to ~1e-5 across devices); the refit MLP, static
+LogisticRegression (lbfgs hits `max_iter`) and static NN (weight init was unseeded before this
+change) may show `DIFF` — their saved scores are then those of the refit, not of the run behind the old `.txt`.
+VGG16 is not covered.
+
 ## Outputs
 
 - `results/features/<tag>/{type}_dynamic_{i}_features_echo.parquet` — per-combo dynamic
@@ -249,5 +283,7 @@ VGG16 writes only a model file (no metrics dump), so it does **not** appear in `
 - `results/experiments/{type}_CNN.txt|.png` — static CNN test metrics (timing-independent).
 - `results/tuning/…_best_params.json` — best HPs (+ val AUC-PR where tuned) per combo / model.
 - `results/models/{LSTM|Transformer}_{type}_{tag}_K{K}_{task}.pt`, `results/models/CNN_{type}.pt` —
-  saved checkpoints (state_dict + best params). XGBoost/MLP/IsolationForest are not checkpointed.
+  saved checkpoints (state_dict + best params). XGBoost/MLP/IsolationForest are not checkpointed
+  (re-scored by refit, see above).
+- `results/predictions/<metrics basename>.parquet` — per-row test scores of every model in that dump.
 - `results/experiments/summary.csv` — the one tidy table for the effect-of-timing analysis.

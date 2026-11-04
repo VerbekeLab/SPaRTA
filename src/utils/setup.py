@@ -60,6 +60,18 @@ def _env_override(key: str, default: Any, cast):
     return cast(raw) if raw is not None else default
 
 
+def resolve_rescore() -> bool:
+    """``SPARTA_RESCORE=1``: re-score finished cells instead of training them.
+
+    The experiment scripts then skip Optuna and the final fit: sequence/CNN models are
+    reloaded from ``results/models/<study>.pt``, tabular baselines are refit once from the
+    stored ``results/tuning/*_best_params.json``. Only ``results/predictions/<stem>.parquet``
+    is written (metrics ``.txt`` and best-params JSON are left untouched), and the reproduced
+    AUC-PR / AUC-ROC are printed next to the ones already on disk as a sanity check.
+    """
+    return _env_override("rescore", False, _as_bool)
+
+
 def resolve_dynamic(data_config: Dict[str, Any]) -> bool:
     """``parameters.time_dynamic`` with ``SPARTA_TIME_DYNAMIC`` overriding the YAML.
 

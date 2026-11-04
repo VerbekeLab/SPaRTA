@@ -138,6 +138,13 @@ time-windowed (snapshot) construction with optional exponential time-decay ("ech
     (what [slurm/missing_runs.sh](slurm/missing_runs.sh) audits). Delete one by hand only to
     force a fresh search — required after changing a `search_space` categorical.
   - `results/models/` — saved `state_dict`s.
+  - `results/predictions/` — per-row test scores (`y_true`, `anchor`, `node`, `score_<model>`), one parquet
+    per metrics dump, written by `evaluation.save_predictions`. Compute any new metric from these; the
+    ROC/PR arrays in the metrics `.txt` are truncated by numpy and unusable. Finished cells that predate
+    this are backfilled with `SPARTA_RESCORE=1` on the same job (no tuning/training; see
+    `slurm/README.md`); `scripts/missing_predictions.py` lists what is still missing.
+    `scripts/extra_metrics.py` derives F1@0.5, best-F1 (oracle threshold) and precision@k from them into
+    `results/experiments/extra_metrics.csv`; the metric functions live in `evaluation.py`.
 - **Class imbalance:** `BCEWithLogitsLoss(pos_weight=...)` with the empirical
   negative/positive ratio (sometimes scaled). Don't substitute focal loss etc. silently.
 - **No `_t` suffix on feature files.** Feature/label files are `<type>_static_…` / `<type>_dynamic_{i}_…`

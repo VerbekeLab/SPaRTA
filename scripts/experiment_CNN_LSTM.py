@@ -21,7 +21,8 @@ from src.utils.setup import (load_config, resolve_dataset, resolve_timing,
                              resolve_sequence, run_tag,
                              resolve_storage, make_pruner,
                              resolve_ts_cache_dir,
-                             resolve_window_store_dir, require_prebuilt_windows)
+                             resolve_window_store_dir, require_prebuilt_windows,
+                             resolve_rescore)
 from src.data.sequence_data import (build_sequence_windows, temporal_split,
                                      fit_scaler_compact, apply_scaler_compact)
 from src.methods.models import (LSTMClassifier, TransformerClassifier, FrameEncoder,
@@ -107,6 +108,10 @@ if __name__ == "__main__":
             chosen.add(_ARCH_ALIASES[tok])
         selected = [m for m in ALL_ARCHS if m in chosen]
     model_suffix = "" if selected == ALL_ARCHS else "_" + "-".join(selected)
+    # SPARTA_RESCORE=1: reload the saved .pt of each selected arch and only write
+    # results/predictions/<stem>_cnnseq<suffix>.parquet (no Optuna, no training, metrics .txt
+    # untouched). See resolve_rescore.
+    rescore = resolve_rescore()
 
     # --- Windowed dataset: identical to experiment_LSTM.py (store -> .npz cache -> assembly).
     values, idx, y, anchors, nodes = build_sequence_windows(
@@ -140,6 +145,7 @@ if __name__ == "__main__":
     val_bands = (to_idx(val_idx), to_y(val_idx))
     test_bands = (to_idx(test_idx), to_y(test_idx))
     y_test = y[test_idx]
+    test_anchors, test_nodes = np.asarray(anchors)[test_idx], np.asarray(nodes)[test_idx]
     del idx
 
     ytr = y[train_idx]
@@ -161,6 +167,23 @@ if __name__ == "__main__":
              ("cnn_transformer", f"CNN-Transformer_{stem}", "CNN-Transformer")]
     archs = [a for a in archs if a[2] in selected]
     for arch, study_name, label in archs:
+        if rescore:
+            ckpt_path = f"results/models/{study_name}.pt"
+            if not os.path.exists(ckpt_path):
+                print(f"[rescore] {label}: no checkpoint at {ckpt_path} -- skipped")
+                continue
+            ckpt = torch.load(ckpt_path, map_location=device, weights_only=False)
+            # The scaler is refit from this cell's train band; it must equal the one the
+            # model was trained with, or the scores below would be for different inputs.
+            if not (np.allclose(ckpt["mu"], mu) and np.allclose(ckpt["sd"], sd)):
+                print(f"[rescore] {label}: WARNING scaler differs from checkpoint's -- "
+                      f"windows/split are not the ones this model was trained on")
+            model = make_model(arch, ckpt["best_params"], n_features)
+            model.load_state_dict(ckpt["state_dict"])
+            model.to(device)
+            scores[label] = predict(model, values_t, test_bands[0])
+            continue
+
         # The Transformer body has no `hidden`, the LSTM body no head_dim/nhead: drop the
         # keys the architecture does not read so its study doesn't tune dead parameters.
         space = {k: v for k, v in search_space.items()
@@ -186,10 +209,20 @@ if __name__ == "__main__":
              "arch": arch, "best_params": best_params, "K": K, "task": task},
             f"results/models/{study_name}.pt")
 
+    pred_path = f"{evaluation.PRED_DIR}/{stem}_cnnseq{model_suffix}.parquet"
+    if rescore:
+        if not scores:
+            raise SystemExit("[rescore] nothing scored: no checkpoint found for the selected models")
+        evaluation.compare_to_metrics(f"results/experiments/{stem}_cnnseq*.txt", scores, y_test)
+        evaluation.save_predictions(pred_path, scores, y_test, test_anchors, test_nodes)
+        print(f"Wrote predictions -> {pred_path}")
+        sys.exit(0)
+
     with open(f"results/tuning/cnnseq_{stem}{model_suffix}_best_params.json", "w") as f:
         json.dump({"dataset": type_dataset, "run_tag": tag, "task": task, "K": K, "echo": echo,
                    "models": best_params_all}, f, indent=2)
 
     metrics_path = f"results/experiments/{stem}_cnnseq{model_suffix}.txt"
     evaluation.write_metrics(metrics_path, scores, y_test)
+    evaluation.save_predictions(pred_path, scores, y_test, test_anchors, test_nodes)
     print(f"Wrote metrics -> {metrics_path}")

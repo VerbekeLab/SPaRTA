@@ -4,6 +4,9 @@ DIR = "./"
 os.chdir(DIR)
 sys.path.append(DIR)
 
+import ast
+
+import numpy as np
 import xgboost as xgb
 from sklearn.model_selection import GridSearchCV
 
@@ -15,7 +18,8 @@ import torch.nn as nn
 from sklearn.linear_model import LogisticRegression
 
 from sklearn.metrics import roc_auc_score, average_precision_score, roc_curve, precision_recall_curve
-from src.utils.setup import load_config, resolve_dataset, resolve_experiment
+from src.utils.setup import load_config, resolve_dataset, resolve_experiment, resolve_rescore
+from src.methods import evaluation
 from src.utils.feature_io import load_table
 
 from src.methods.models import NeuralNetwork
@@ -30,13 +34,18 @@ def data_prep_features(data_directory, dataset_type):
     X = df.drop(columns=['node','label'])
     y = df['label']
     X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=1997) 
-    return X_train, X_test, y_train, y_test
+    # Test-row node ids (X/y keep df's index through train_test_split), so saved predictions can
+    # be joined back to accounts.
+    node_test = df.loc[X_test.index, 'node'].to_numpy()
+    return X_train, X_test, y_train, y_test, node_test
 
-def experiment_features_LogisticRegression(X_train, X_test, y_train, y_test, dataset_type):
+def experiment_features_LogisticRegression(X_train, X_test, y_train, y_test, dataset_type, rescore=False):
     logreg = LogisticRegression(max_iter=1000)
     logreg.fit(X_train, y_train)
 
     y_pred_proba = logreg.predict_proba(X_test)[:, 1]
+    if rescore:
+        return y_pred_proba
     fpr, tpr, thresholds = roc_curve(y_test, y_pred_proba)
     AUC_ROC = roc_auc_score(y_test, y_pred_proba)
 
@@ -50,6 +59,7 @@ def experiment_features_LogisticRegression(X_train, X_test, y_train, y_test, dat
         f.write(f'TPR: {tpr}\n')
         f.write(f'Precision: {precision}\n')
         f.write(f'Recall: {recall}\n')
+    return y_pred_proba
 
 def experiment_features_XGBoost_tune(X_train, y_train, dataset_type, xgb_params):
     param_grid = xgb_params['param_grid']
@@ -66,13 +76,24 @@ def experiment_features_XGBoost_tune(X_train, y_train, dataset_type, xgb_params)
     return gridsearch.best_params_
 
 
-def experiment_features_XGBoost(X_train, X_test, y_train, y_test, dataset_type, xgb_params):
+def stored_xgb_params(dataset_type):
+    """Best params from the HPT dump (first line is 'Best_parameters:{...}'); SPARTA_RESCORE reuses
+    them instead of re-running the grid search."""
+    with open(f'results/experiments/{dataset_type}_HPT_features_XGBoost.txt') as f:
+        first = f.readline()
+    return ast.literal_eval(first.split('Best_parameters:', 1)[1].strip())
+
+
+def experiment_features_XGBoost(X_train, X_test, y_train, y_test, dataset_type, xgb_params, rescore=False):
     dtrain = xgb.DMatrix(X_train, label=y_train)
     dtest = xgb.DMatrix(X_test, label=y_test)
 
-    params = experiment_features_XGBoost_tune(X_train, y_train, dataset_type, xgb_params)
+    params = (stored_xgb_params(dataset_type) if rescore
+              else experiment_features_XGBoost_tune(X_train, y_train, dataset_type, xgb_params))
     model = xgb.train(params, dtrain, num_boost_round=xgb_params['num_boost_round'])
     y_pred_proba = model.predict(dtest)
+    if rescore:
+        return y_pred_proba
     fpr, tpr, thresholds = roc_curve(y_test, y_pred_proba)
     AUC_ROC = roc_auc_score(y_test, y_pred_proba)
 
@@ -86,9 +107,11 @@ def experiment_features_XGBoost(X_train, X_test, y_train, y_test, dataset_type, 
         f.write(f'TPR: {tpr}\n')
         f.write(f'Precision: {precision}\n')
         f.write(f'Recall: {recall}\n')
+    return y_pred_proba
 
 
-def experiment_features_NN(X_train, X_test, y_train, y_test, dataset_type, nn_params):
+def experiment_features_NN(X_train, X_test, y_train, y_test, dataset_type, nn_params, rescore=False):
+    torch.manual_seed(1997)   # weight init was unseeded; seeded so a SPARTA_RESCORE refit is reproducible
     input_size = X_train.shape[1]
     hidden_size = nn_params['hidden_size']
     output_size = nn_params['output_size']
@@ -132,6 +155,8 @@ def experiment_features_NN(X_train, X_test, y_train, y_test, dataset_type, nn_pa
     model.eval()
     with torch.no_grad():
         test_outputs = model(X_test_tensor).squeeze()
+        if rescore:
+            return torch.sigmoid(test_outputs).numpy()
         fpr, tpr, thresholds = roc_curve(y_test, torch.sigmoid(test_outputs))
         AUC_ROC = roc_auc_score(y_test, torch.sigmoid(test_outputs))
 
@@ -145,6 +170,7 @@ def experiment_features_NN(X_train, X_test, y_train, y_test, dataset_type, nn_pa
         f.write(f'TPR: {tpr}\n')
         f.write(f'Precision: {precision}\n')
         f.write(f'Recall: {recall}\n')
+    return torch.sigmoid(test_outputs).numpy()
 
 if __name__ == "__main__":
     data_config = load_config("config/data/config.yaml")
@@ -163,7 +189,17 @@ if __name__ == "__main__":
 
     os.makedirs('results/experiments', exist_ok=True)
 
-    X_train, X_test, y_train, y_test = data_prep_features(data_directory, dataset_type)
-    experiment_features_LogisticRegression(X_train, X_test, y_train, y_test, dataset_type)
-    experiment_features_XGBoost(X_train, X_test, y_train, y_test, dataset_type, xgb_params)
-    experiment_features_NN(X_train, X_test, y_train, y_test, dataset_type, nn_params)
+    rescore = resolve_rescore()   # SPARTA_RESCORE=1: refit, write only results/predictions/ (see setup.py)
+    X_train, X_test, y_train, y_test, node_test = data_prep_features(data_directory, dataset_type)
+    scores = {
+        'LogisticRegression': experiment_features_LogisticRegression(X_train, X_test, y_train, y_test, dataset_type, rescore),
+        'XGBoost': experiment_features_XGBoost(X_train, X_test, y_train, y_test, dataset_type, xgb_params, rescore),
+        'NN': experiment_features_NN(X_train, X_test, y_train, y_test, dataset_type, nn_params, rescore),
+    }
+    y_test_np = y_test.to_numpy()
+    pred_path = f"{evaluation.PRED_DIR}/{dataset_type}_features.parquet"
+    if rescore:
+        for name, sc in scores.items():
+            evaluation.compare_to_metrics(f"results/experiments/{dataset_type}_features_{name}.txt", {name: sc}, y_test_np)
+    evaluation.save_predictions(pred_path, scores, y_test_np, nodes=node_test)
+    print(f"Wrote predictions -> {pred_path}")

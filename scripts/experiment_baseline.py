@@ -20,6 +20,7 @@ sys.path.append(DIR)
 import xgboost as xgb            # imported (unused here but kept for parity / OpenMP order)
 import numpy as np
 
+import glob
 import json
 import optuna
 from sklearn.metrics import average_precision_score
@@ -28,7 +29,8 @@ from src.utils.setup import (load_config, resolve_dataset, resolve_timing,
                              resolve_sequence, run_tag, suggest_param,
                              resolve_storage, make_pruner, optimize_study,
                              resolve_ts_cache_dir,
-                             resolve_window_store_dir, require_prebuilt_windows)
+                             resolve_window_store_dir, require_prebuilt_windows,
+                             resolve_rescore)
 from src.data.sequence_data import build_sequence_windows, temporal_split
 from src.methods import evaluation
 
@@ -36,7 +38,7 @@ SEED = 1997
 
 
 def run_xgb_baseline(Xtr2d, ytr, Xval2d, yval, Xte2d, search_space, seed=SEED, n_trials=20,
-                     study_name=None, storage=None, early_stopping_rounds=None):
+                     study_name=None, storage=None, early_stopping_rounds=None, fixed_params=None):
     """XGBoost on already-2D feature arrays. Optuna tuning of AUC-PR on the (Xval2d, yval)
     band only (no CV shuffle). Returns (probs_te, best_params, best_value). Imbalance via
     scale_pos_weight (mirrors the bce pos_weight in the sequence models).
@@ -59,6 +61,9 @@ def run_xgb_baseline(Xtr2d, ytr, Xval2d, yval, Xte2d, search_space, seed=SEED, n
         clf.fit(Xtr2d, ytr, eval_set=[(Xval2d, yval)], verbose=False)
         return clf
 
+    if fixed_params is not None:    # SPARTA_RESCORE: refit the stored best params, no study
+        return _fit(**fixed_params).predict_proba(Xte2d)[:, 1], fixed_params, None
+
     def objective(trial):
         params = {name: suggest_param(trial, name, spec) for name, spec in search_space.items()}
         clf = _fit(**params)
@@ -79,7 +84,8 @@ def run_xgb_baseline(Xtr2d, ytr, Xval2d, yval, Xte2d, search_space, seed=SEED, n
 
 
 def run_nn_baseline(Xtr2d, ytr, Xval2d, yval, Xte2d, search_space, seed=SEED,
-                    n_trials=20, patience=20, study_name=None, storage=None, pruner=None):
+                    n_trials=20, patience=20, study_name=None, storage=None, pruner=None,
+                    fixed_params=None):
     """Feed-forward MLP on the already-2D feature arrays. Light Optuna tuning of AUC-PR on
     the (Xval2d, yval) band only — mirrors run_xgb_baseline. Two deliberate deviations from
     the tree baselines: (1) features are standardised (StandardScaler fit on TRAIN only),
@@ -172,6 +178,9 @@ def run_nn_baseline(Xtr2d, ytr, Xval2d, yval, Xte2d, search_space, seed=SEED,
             probs = torch.sigmoid(model(X_eval).squeeze(-1)).cpu().numpy()
         return best_ap, probs
 
+    if fixed_params is not None:    # SPARTA_RESCORE: refit the stored best params, no study
+        return _fit_predict(fixed_params, Xte)[1], fixed_params, None
+
     def objective(trial):
         params = {name: suggest_param(trial, name, spec) for name, spec in search_space.items()}
         best_ap, _ = _fit_predict(params, Xval, trial=trial)
@@ -201,6 +210,20 @@ def run_iforest_baseline(Xtr2d, Xte2d, params=None, seed=SEED):
     clf = IsolationForest(random_state=seed, **(params or {}))
     clf.fit(Xtr2d)
     return -clf.score_samples(Xte2d)
+
+
+def stored_best_params(kind, stem, model):
+    """best_params of `model` for this cell from results/tuning/{kind}_{stem}*_best_params.json.
+    Globs over the per-model fan-out suffixes, so it does not matter which SPARTA_BASELINE_MODELS
+    selection the cell was originally trained with. SPARTA_RESCORE refits from these, so a
+    missing entry is an error (never a silent re-tune)."""
+    for path in sorted(glob.glob(f"results/tuning/{kind}_{stem}*_best_params.json")):
+        with open(path) as f:
+            entry = json.load(f).get("models", {}).get(model)
+        if entry and entry.get("best_params"):
+            return entry["best_params"]
+    raise SystemExit(f"[rescore] no stored best_params for {model} in "
+                     f"results/tuning/{kind}_{stem}*_best_params.json")
 
 
 def _xgb_arrays(values, band_idx, K, task, local=False):
@@ -309,6 +332,12 @@ if __name__ == "__main__":
     # combined (all-models) dump and these suffixed per-model dumps.
     stem = f"{type_dataset}_{tag}_K{K}_{task}"
     model_suffix = "" if selected == ALL_MODELS else "_" + "-".join(selected)
+    # SPARTA_RESCORE=1: refit each selected model ONCE from its stored best_params and only write
+    # results/predictions/<stem>_<kind><suffix>.parquet (no Optuna; metrics .txt / params JSON
+    # untouched). Tabular refits are seeded but not guaranteed bit-identical, so the reproduced
+    # AUC-PR / AUC-ROC are printed next to the stored ones.
+    rescore = resolve_rescore()
+    fixed = (lambda m: stored_best_params(kind, stem, m)) if rescore else (lambda m: None)
 
     # --- Build the SAME windowed dataset the sequence models use (same tag-namespaced
     # features_dir + cache_dir + store_dir as experiment_LSTM.py). Sources in order: the
@@ -365,7 +394,7 @@ if __name__ == "__main__":
         scores["XGBoost"], xgb_best, xgb_value = run_xgb_baseline(
             Xtr2d, ytr, Xval2d, yval, Xte2d, xgb_search_space, seed=SEED, n_trials=n_trials,
             study_name=xgb_study, storage=resolve_storage(bl_cfg, study_name=xgb_study),
-            early_stopping_rounds=xgb_esr)
+            early_stopping_rounds=xgb_esr, fixed_params=fixed("XGBoost"))
         best_params_all["XGBoost"] = {"best_params": xgb_best, "best_value_AUCPR": xgb_value}
 
     # --- Feed-forward MLP (supervised, tuned on the val band; standardised inputs; pruned + resumable).
@@ -374,13 +403,21 @@ if __name__ == "__main__":
         scores["NeuralNetwork"], nn_best, nn_value = run_nn_baseline(
             Xtr2d, ytr, Xval2d, yval, Xte2d, nn_search_space, seed=SEED, n_trials=nn_n_trials,
             patience=patience, study_name=nn_study, storage=resolve_storage(bl_cfg, study_name=nn_study),
-            pruner=make_pruner(bl_cfg))
+            pruner=make_pruner(bl_cfg), fixed_params=fixed("NeuralNetwork"))
         best_params_all["NeuralNetwork"] = {"best_params": nn_best, "best_value_AUCPR": nn_value}
 
     # --- Isolation Forest (unsupervised, fixed params — labels are not used).
     if "IsolationForest" in selected:
         scores["IsolationForest"] = run_iforest_baseline(Xtr2d, Xte2d, params=iforest_params, seed=SEED)
         best_params_all["IsolationForest"] = {"params": iforest_params}
+
+    test_anchors, test_nodes = np.asarray(anchors)[test_idx], np.asarray(nodes)[test_idx]
+    pred_path = f"{evaluation.PRED_DIR}/{stem}_{kind}{model_suffix}.parquet"
+    if rescore:
+        evaluation.compare_to_metrics(f"results/experiments/{stem}_{kind}*.txt", scores, y_test)
+        evaluation.save_predictions(pred_path, scores, y_test, test_anchors, test_nodes)
+        print(f"Wrote predictions -> {pred_path}")
+        sys.exit(0)
 
     # --- Persist best params, metrics, and the ROC/PR comparison figure. model_suffix is ""
     # for an all-models run (original filenames) and "_<models>" for a per-model fan-out task.
@@ -390,9 +427,10 @@ if __name__ == "__main__":
 
     metrics_path = f"results/experiments/{stem}_{kind}{model_suffix}.txt"
     evaluation.write_metrics(metrics_path, scores, y_test)
+    evaluation.save_predictions(pred_path, scores, y_test, test_anchors, test_nodes)
     # Curve PNGs disabled: they only compare the models within this run (not across all
-    # experiments) and the per-combo figures add up on VSC storage. The .txt metrics keep
-    # the ROC/PR arrays, so curves can still be re-plotted offline if ever needed.
+    # experiments) and the per-combo figures add up on VSC storage. The curves can be re-plotted
+    # offline from results/predictions/ (NOT from the .txt arrays, which numpy truncates with "...").
     # evaluation.plot_curves(
     #     scores, y_test,
     #     f"Baselines ({task}, {tag}) — {type_dataset} (n={len(y_test)}, {int(y_test.sum())} positive)",
