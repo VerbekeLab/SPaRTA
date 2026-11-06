@@ -15,15 +15,21 @@
 #SBATCH --output=slurm/logs/train_gnn_%A_%a.out
 #SBATCH --error=slurm/logs/train_gnn_%A_%a.err
 #SBATCH --array=0-23
+# MEASURED on a laptop CPU (2026-11-06), one epoch per model on the two heaviest cells — the
+# smallest K and the widest echo, i.e. the most training rows on the densest graphs:
+#   AMLWorld h6_echo2 K=7 (array 6): 7.8M train rows, 17M edges; 1L 15 s, 2L 81 s per epoch
+#   Tide     d2_echo7 K=3 (array 6): 4.5M train rows, 48M edges; 1L 28 s, 2L 350 s per epoch
+# Neighbour sampling (CPU, also on the cluster) was only ~10% of the Tide 2L epoch; the rest is
+# model maths the A100 takes over. Each model stops after 5 epochs without val improvement
+# (max 50), so even 50 + 50 epochs should fit in 4 h. Confirm on the first job:
+#   sbatch --array=6 slurm/train_gnn.slurm Tide   -> check its log and `seff <jobid>`
 #SBATCH --time=04:00:00
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=8
-# Not yet measured on the cluster. The job holds the band graphs (int64 edge lists, every
-# transaction once per snapshot it falls in), the transaction frame and the window rows; the
-# store's 90-feature block is memory-mapped and never read. Check `seff` on the first AMLWorld
-# h6_echo2 task (the densest graphs) and tighten.
-#SBATCH --mem=32G
+# Peak host RAM in the same runs: 8.7 GB (AMLWorld), 8.3 GB (Tide). 20G leaves room for the CUDA
+# context and forecast cells (a few % more nodes). PACK=4 in pack_gpu.slurm's 64G fits too.
+#SBATCH --mem=20G
 #SBATCH --gpus-per-node=1
 
 #SBATCH --clusters=wice
