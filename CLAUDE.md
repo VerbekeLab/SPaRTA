@@ -61,7 +61,7 @@ time-windowed (snapshot) construction with optional exponential time-decay ("ech
   renders 224×224 RGB PNGs of each node's 2-hop subgraph via igraph + cairo, packs
   bits, and writes batched `.pkl` + `.h5` to `results/pickle/`.
 - **Model definitions** — [src/methods/models.py](src/methods/models.py)
-  (`NeuralNetwork`, `CNN`, `CNN_time`, `CNN_visual_VGG16`, `LSTMClassifier`, `TransformerClassifier`, `FrameEncoder`, `CNNSequenceClassifier`).
+  (`NeuralNetwork`, `CNN`, `CNN_time`, `CNN_visual_VGG16`, `LSTMClassifier`, `TransformerClassifier`, `FrameEncoder`, `CNNSequenceClassifier`, `GraphSAGE`).
 - **Training entry points** — [scripts/experiment_features.py](scripts/experiment_features.py)
   (LogReg + XGBoost grid search + NN on the 3×3 features),
   [scripts/experiment_CNN.py](scripts/experiment_CNN.py) (CNN over the 3×3 pictures
@@ -75,6 +75,12 @@ time-windowed (snapshot) construction with optional exponential time-decay ("ech
   windows/split/losses/Optuna protocol as `experiment_LSTM.py`, whose flat-input models are its
   ablation; shared training loop in [src/methods/sequence_training.py](src/methods/sequence_training.py);
   outputs `*_cnnseq*.txt`, studies `CNN-LSTM_*`/`CNN-Transformer_*`, config block `cnn_seq`),
+  [scripts/experiment_GNN.py](scripts/experiment_GNN.py) (GraphSAGE as in GARG-AML: log(1 + degree)
+  as the only node feature, a 1- and a 2-layer model, fixed hyperparameters from the `gnn` config
+  block, no Optuna; same rows/split as the window baselines, each row scored on its anchor snapshot's
+  graph (forecast: the snapshot before) rebuilt from the raw transactions; `GraphSAGE` in `models.py`;
+  [slurm/train_gnn.slurm](slurm/train_gnn.slurm), `--array=0-23`; outputs `*_gnn.txt`, models
+  `GraphSAGE-1L`/`GraphSAGE-2L`; needs `torch_geometric` + `pyg-lib`),
   [scripts/experiment_baseline.py](scripts/experiment_baseline.py) (non-sequential
   baselines — tuned XGBoost, a tuned feed-forward MLP (standardised inputs, mini-batch +
   early stopping), and unsupervised IsolationForest — on the **same** K-snapshot windows
@@ -102,7 +108,8 @@ time-windowed (snapshot) construction with optional exponential time-decay ("ech
 
 - **Graphs:** networkx for all algorithmic work (ego graphs, communities, adjacency).
   igraph + cairo only for rendering 224×224 PNGs in `visualising_network.py`.
-- **DL:** PyTorch (no Lightning trainer is actually wired up despite the dependency).
+- **DL:** PyTorch (no Lightning trainer is actually wired up despite the dependency);
+  PyTorch Geometric (`SAGEConv`, `NeighborLoader`) for the GraphSAGE baseline only.
 - **Tabular / preprocessing:** pandas; matplotlib for figures.
 - **Classical ML:** xgboost (with `GridSearchCV`), sklearn `LogisticRegression`.
 - **HPO:** optuna (CNN); sklearn `GridSearchCV` (XGBoost).

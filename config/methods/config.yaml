@@ -198,6 +198,23 @@ defaults:
       n_estimators: 200
       max_samples: 'auto'
 
+  # GraphSAGE (scripts/experiment_GNN.py) on the same rows and temporal split as the baselines,
+  # with log(1 + degree) as the only node feature. FIXED hyperparameters — GARG-AML's GraphSAGE
+  # set-up (its Table 9) — no Optuna search. One model per `layers` entry: the depth is the
+  # receptive field in hops, so [1, 2] shows the gain of the second hop and stops at the
+  # second-order neighbourhood SPaRTA itself uses.
+  gnn: &gnn
+    layers: [1, 2]
+    hidden: 64
+    dropout: 0.2
+    lr: 0.001
+    weight_decay: 0.0
+    num_neighbors: [25, 10]  # training fan-out per hop; a 1-layer model uses the first entry
+    batch_size: 1024         # seed nodes per mini-batch
+    epochs: 50               # max epochs
+    patience: 5              # epochs without val-AUC-PR improvement; best epoch restored
+    num_workers: 0           # NeighborLoader sampling workers (0 = in the main process)
+
 AMLWorld:
   features_NN:
     <<: *features_NN
@@ -211,6 +228,8 @@ AMLWorld:
     <<: *cnn_seq
   baselines:
     <<: *baselines
+  gnn:
+    <<: *gnn
 
 AMLSim:
   features_NN:
@@ -225,6 +244,8 @@ AMLSim:
     <<: *cnn_seq
   baselines:
     <<: *baselines
+  gnn:
+    <<: *gnn
 
 Tide:
   features_NN:
@@ -239,3 +260,5 @@ Tide:
     <<: *cnn_seq
   baselines:
     <<: *baselines
+  gnn:
+    <<: *gnn

@@ -25,6 +25,7 @@ FAMILIES = [  # (label, regex on the metrics basename)
     ("CNN-LSTM/CNN-Transformer", r"_(?:nowcast|forecast)_cnnseq"),
     ("window baselines", r"_(?:nowcast|forecast)_baselines"),
     ("local baselines", r"_(?:nowcast|forecast)_local"),
+    ("GraphSAGE", r"_(?:nowcast|forecast)_gnn"),
     ("static features", r"_features_(?:LogisticRegression|XGBoost|NN)\.txt$"),
     ("static CNN", r"_CNN\.txt$"),
 ]

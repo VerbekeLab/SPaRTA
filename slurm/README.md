@@ -53,6 +53,7 @@ grid itself stays in lockstep — only the `#SBATCH --array=` line is hand-kept)
 - `build_windows.slurm`: `0-3` (timing combos — K/task are free re-slices of one store)
 - `train_lstm.slurm` / `train_cnn_seq.slurm` / `train_baseline.slurm` / `train_baseline_nn.slurm`: `0-23` (timing × K × task)
 - `train_local.slurm` / `train_local_nn.slurm`: `1-23:2` (the forecast half of the same grid)
+- `train_gnn.slurm`: `0-23` (same grid; both GraphSAGE depths in one task)
 - `extract_features.slurm`, `train_features.slurm`, `train_cnn.slurm`: no array (one job = one dataset)
 
 ## What depends on what
@@ -79,6 +80,12 @@ grid itself stays in lockstep — only the `#SBATCH --array=` line is hand-kept)
   the nowcast window baseline already reads just the anchor snapshot (it *is* the local nowcast);
   hence `--array=1-23:2`, the odd = forecast cells. Separate `local_*` studies and `*_local*.txt`
   dumps, so it never resumes or overwrites the window baseline's.
+  `train_gnn.slurm` (GPU, `experiment_GNN.py`) runs **GraphSAGE** as in GARG-AML: log(1 + degree)
+  as the only node feature, a 1- and a 2-layer model (one vs two hops), fixed hyperparameters (the
+  `gnn` config block, no Optuna). Same rows and split as each window cell; the graph is the anchor
+  snapshot's (nowcast) or the one before (forecast), rebuilt from the raw transactions, so it needs
+  `data/` as well as the window store, and `torch_geometric` + `pyg-lib` (see `environment.txt`).
+  All 24 cells; dumps `*_gnn.txt` with models `GraphSAGE-1L` / `GraphSAGE-2L`.
 - **Stage 1.5, `build_windows.slurm`** sits between them. The stacked snapshot block a
   window build needs depends on the **tag alone**, not on K or the task, so it is built once
   per tag (4 CPU tasks) into a prebuilt *window store* (`src/data/window_store.py`); each of
@@ -115,6 +122,7 @@ BASE=$(sbatch --parsable --dependency=afterok:$WINDOWS slurm/train_baseline.slur
 BASE_NN=$(sbatch --parsable --dependency=afterok:$WINDOWS slurm/train_baseline_nn.slurm $DS) # 24 (GPU: MLP)
 LOCAL=$(sbatch --parsable --dependency=afterok:$WINDOWS slurm/train_local.slurm $DS)      # 12 (CPU: local XGBoost + IForest, forecast)
 LOCAL_NN=$(sbatch --parsable --dependency=afterok:$WINDOWS slurm/train_local_nn.slurm $DS) # 12 (GPU: local MLP, forecast)
+GNN=$(sbatch --parsable --dependency=afterok:$WINDOWS slurm/train_gnn.slurm $DS)          # 24 (GPU: GraphSAGE 1 + 2 layers)
 ```
 
 Once the training jobs of **all datasets you care about** have finished, aggregate
@@ -279,10 +287,10 @@ VGG16 is not covered.
   features (`_w` combos drop the `_echo` suffix; readers also accept legacy `.csv`).
 - `results/features/{type}_static_features.parquet` — static features (flat, shared).
 - `results/timeseries/<tag>/…npz` — per-combo windowed cache (the tag kills the stale-cache bug).
-- `results/experiments/{type}_{tag}_K{K}_{task}_{timeseries|cnnseq|baselines|local}.txt|.png` — per-combo metrics.
+- `results/experiments/{type}_{tag}_K{K}_{task}_{timeseries|cnnseq|baselines|local|gnn}.txt|.png` — per-combo metrics.
 - `results/experiments/{type}_CNN.txt|.png` — static CNN test metrics (timing-independent).
 - `results/tuning/…_best_params.json` — best HPs (+ val AUC-PR where tuned) per combo / model.
-- `results/models/{LSTM|Transformer}_{type}_{tag}_K{K}_{task}.pt`, `results/models/CNN_{type}.pt` —
+- `results/models/{LSTM|Transformer|GraphSAGE-1L|GraphSAGE-2L}_{type}_{tag}_K{K}_{task}.pt`, `results/models/CNN_{type}.pt` —
   saved checkpoints (state_dict + best params). XGBoost/MLP/IsolationForest are not checkpointed
   (re-scored by refit, see above).
 - `results/predictions/<metrics basename>.parquet` — per-row test scores of every model in that dump.

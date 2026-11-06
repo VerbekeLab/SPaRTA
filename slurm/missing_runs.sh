@@ -28,6 +28,7 @@
 #   NeuralNetwork (MLP)              -> train_baseline_nn.slurm <Dataset>
 #   Local-XGBoost / Local-IsolationForest -> train_local.slurm <Dataset> xgboost|iforest
 #   Local-NeuralNetwork              -> train_local_nn.slurm <Dataset>
+#   GraphSAGE-1L / GraphSAGE-2L      -> train_gnn.slurm <Dataset>   (fixed params, no study)
 # The Local-* models (SPARTA_BASELINE_VIEW=local) are forecast-only, so only the ODD cells are
 # audited for them; their dumps are {stem}_local*.txt with plain 'Model: XGBoost' blocks.
 #
@@ -48,7 +49,7 @@ shopt -s nullglob
 source slurm/sweep_common.sh
 
 MODELS="LSTM Transformer CNN-LSTM CNN-Transformer XGBoost NeuralNetwork IsolationForest
-        Local-XGBoost Local-NeuralNetwork Local-IsolationForest"
+        Local-XGBoost Local-NeuralNetwork Local-IsolationForest GraphSAGE-1L GraphSAGE-2L"
 TOTAL=$((N_TIMING * N_K * N_TASK))
 
 # Reading a study's trial count needs the sqlite3 CLI; without it every tuned cell that has a
@@ -111,7 +112,7 @@ _finished_trials() {
 
 _kind_of() {
     case $1 in LSTM|Transformer) echo timeseries ;; CNN-LSTM|CNN-Transformer) echo cnnseq ;;
-               Local-*) echo local ;; *) echo baselines ;; esac
+               Local-*) echo local ;; GraphSAGE-*) echo gnn ;; *) echo baselines ;; esac
 }
 _study_of() {   # study name for model $1 on stem $2 ('' = untuned, no study)
     case $1 in
@@ -123,7 +124,7 @@ _study_of() {   # study name for model $1 on stem $2 ('' = untuned, no study)
         NeuralNetwork)   echo "baseline_nn_$2" ;;
         Local-XGBoost)       echo "local_xgb_$2" ;;
         Local-NeuralNetwork) echo "local_nn_$2" ;;
-        IsolationForest|Local-IsolationForest) echo "" ;;
+        IsolationForest|Local-IsolationForest|GraphSAGE-*) echo "" ;;
     esac
 }
 _submit_of() {  # script + args resubmitting model $1 for dataset $2
@@ -138,6 +139,7 @@ _submit_of() {  # script + args resubmitting model $1 for dataset $2
         Local-XGBoost)         echo "slurm/train_local.slurm $2 xgboost" ;;
         Local-NeuralNetwork)   echo "slurm/train_local_nn.slurm $2" ;;
         Local-IsolationForest) echo "slurm/train_local.slurm $2 iforest" ;;
+        GraphSAGE-*)           echo "slurm/train_gnn.slurm $2" ;;
     esac
 }
 _sorted() { printf '%s\n' $(printf '%s' "$1" | tr ',' ' ') | sort -n | paste -sd, -; }

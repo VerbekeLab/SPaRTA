@@ -250,3 +250,27 @@ class CNNSequenceClassifier(nn.Module):
         z = x.new_zeros(B, T, self.emb_dim)
         z[mask] = self.encoder(x[mask])
         return self.body(z, mask)
+
+
+class GraphSAGE(nn.Module):
+    """GraphSAGE node classifier (Hamilton et al., 2017), the GNN baseline of GARG-AML.
+
+    `num_layers` SAGEConv layers (mean aggregation, root weight) of width `hidden`, each followed
+    by ReLU and dropout, then a linear head giving one logit per node. The depth IS the receptive
+    field: 1 layer sees the direct counterparties, 2 layers the second-order neighbourhood a SPaRTA
+    frame is built from. Every depth gets the same per-hop width and the same head, so going from
+    1 to 2 layers adds exactly one hop of information. torch_geometric is imported here rather
+    than at module level, so the other models keep working in an env without PyG."""
+    def __init__(self, in_channels=1, hidden=64, num_layers=2, dropout=0.2):
+        super().__init__()
+        from torch_geometric.nn import SAGEConv
+        self.convs = nn.ModuleList(
+            SAGEConv(in_channels if i == 0 else hidden, hidden) for i in range(num_layers))
+        self.dropout = dropout
+        self.head = nn.Linear(hidden, 1)
+
+    def forward(self, x, edge_index):
+        for conv in self.convs:
+            x = F.relu(conv(x, edge_index))
+            x = F.dropout(x, p=self.dropout, training=self.training)
+        return self.head(x).squeeze(-1)

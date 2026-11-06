@@ -1,15 +1,17 @@
 # Aggregate every model's metrics into one tidy long-format table for the
 # "effect of timing parameters" analysis. Walks results/experiments/ for metric dumps from
-# experiment_LSTM.py / experiment_CNN_LSTM.py / experiment_baseline.py / experiment_features.py / experiment_CNN.py
+# experiment_LSTM.py / experiment_CNN_LSTM.py / experiment_baseline.py / experiment_GNN.py /
+# experiment_features.py / experiment_CNN.py
 # and writes results/experiments/summary.csv with one row per (dataset, run_tag, K, task, model).
 #
 # Run from the repo root: python scripts/collect_results.py
 #
 # Filename conventions parsed (set by the experiment scripts):
-#   dynamic:  {type}_{tag}_K{K}_{task}_{timeseries|cnnseq|baselines|local}.txt   (write_metrics
+#   dynamic:  {type}_{tag}_K{K}_{task}_{timeseries|cnnseq|baselines|local|gnn}.txt   (write_metrics
 #             blocks; cnnseq = the CNN->LSTM/Transformer models of experiment_CNN_LSTM.py;
 #             local = experiment_baseline.py's SPARTA_BASELINE_VIEW=local, whose models are
-#             prefixed "Local " so they don't collide with the window baselines')
+#             prefixed "Local " so they don't collide with the window baselines'; gnn = the
+#             GraphSAGE-1L / GraphSAGE-2L models of experiment_GNN.py)
 #   static:   {type}_features_{LogisticRegression|XGBoost|NN}.txt   (single-model dump)
 #   CNN:      {type}_CNN.txt                                        (write_metrics block, test split)
 # where tag matches <g><step>_(echo<days>|w<width>) with g the time_type initial
@@ -37,7 +39,7 @@ OUT_PATH = os.path.join(EXP_DIR, "summary.csv")
 # from the 'Model:' blocks inside.
 DYNAMIC_RE = re.compile(
     r"^(?P<type>.+?)_(?P<tag>[a-z]\d+_(?:echo\d+|w\d+))_K(?P<K>\d+)_"
-    r"(?P<task>nowcast|forecast)_(?P<kind>timeseries|cnnseq|baselines|local)"
+    r"(?P<task>nowcast|forecast)_(?P<kind>timeseries|cnnseq|baselines|local|gnn)"
     r"(?:_(?P<models>[A-Za-z][A-Za-z-]*))?\.txt$"
 )
 STATIC_RE = re.compile(
@@ -46,6 +48,10 @@ STATIC_RE = re.compile(
 CNN_RE = re.compile(r"^(?P<type>.+)_CNN\.txt$")
 _PR = re.compile(r"AUC PR:\s*([0-9.eE+\-]+)")
 _ROC = re.compile(r"AUC ROC:\s*([0-9.eE+\-]+)")
+# First entry of the dumped Precision array = precision at the lowest threshold (everything predicted
+# positive) = positive rate of the test set = the AUC-PR of a no-skill classifier. numpy truncates the
+# middle of the array when printing, never its first element.
+_PREC0 = re.compile(r"^Precision:\s*\[\s*([0-9.eE+\-]+)", re.MULTILINE)
 
 
 def _f(m):
@@ -54,8 +60,9 @@ def _f(m):
 
 
 def parse_write_metrics(text):
-    """Per-model (AUC_PR, AUC_ROC) from an evaluation.write_metrics dump — one block per
-    'Model:' line. Returns {model_name: (aucpr, aucroc)}."""
+    """Per-model (AUC_PR, AUC_ROC, prevalence) from an evaluation.write_metrics dump — one block per
+    'Model:' line. Returns {model_name: (aucpr, aucroc, prevalence)}; prevalence is the test positive
+    rate (the no-skill AUC-PR), None if the dump has no Precision line."""
     out = {}
     blocks = re.split(r"^Model:\s*", text, flags=re.MULTILINE)
     for blk in blocks:
@@ -63,7 +70,7 @@ def parse_write_metrics(text):
         if not blk:
             continue
         name = blk.splitlines()[0].strip()
-        out[name] = (_f(_PR.search(blk)), _f(_ROC.search(blk)))
+        out[name] = (_f(_PR.search(blk)), _f(_ROC.search(blk)), _f(_PREC0.search(blk)))
     return out
 
 
@@ -85,10 +92,10 @@ def collect():
         if m:
             # LSTM/baseline: multi-model write_metrics dump, scored on the test band.
             prefix = "Local " if m["kind"] == "local" else ""
-            for model, (pr, roc) in parse_write_metrics(text).items():
+            for model, (pr, roc, prev) in parse_write_metrics(text).items():
                 rows.append(dict(dataset=m["type"], run_tag=m["tag"], K=int(m["K"]),
                                  task=m["task"], model=prefix + model, split="test",
-                                 AUC_PR=pr, AUC_ROC=roc))
+                                 AUC_PR=pr, AUC_ROC=roc, PREVALENCE=prev))
             continue
 
         s = STATIC_RE.match(fname)
@@ -97,15 +104,15 @@ def collect():
             rows.append(dict(dataset=s["type"], run_tag="static", K=None, task=None,
                              model={"NN": "NeuralNetwork"}.get(s["model"], s["model"]),
                              split="test", AUC_PR=_f(_PR.search(text)),
-                             AUC_ROC=_f(_ROC.search(text))))
+                             AUC_ROC=_f(_ROC.search(text)), PREVALENCE=_f(_PREC0.search(text))))
             continue
 
         c = CNN_RE.match(fname)
         if c:
             # experiment_CNN: single-model write_metrics dump, scored on the test band.
-            for model, (pr, roc) in parse_write_metrics(text).items():
+            for model, (pr, roc, prev) in parse_write_metrics(text).items():
                 rows.append(dict(dataset=c["type"], run_tag="static", K=None, task=None,
-                                 model=model, split="test", AUC_PR=pr, AUC_ROC=roc))
+                                 model=model, split="test", AUC_PR=pr, AUC_ROC=roc, PREVALENCE=prev))
             continue
 
         # *_HPT_features_XGBoost.txt and anything else are not metric dumps — skip quietly
@@ -114,7 +121,7 @@ def collect():
             unparsed.append(fname)
 
     df = pd.DataFrame(rows, columns=["dataset", "run_tag", "K", "task", "model",
-                                     "split", "AUC_PR", "AUC_ROC"])
+                                     "split", "AUC_PR", "AUC_ROC", "PREVALENCE"])
     # A per-model baseline fan-out and a combined all-models run of the same combo produce the
     # same (dataset, run_tag, K, task, model) metrics in two files; keep one so it isn't counted
     # twice. keep="last" is arbitrary — they are identical (same seed, same code).

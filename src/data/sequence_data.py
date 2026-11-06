@@ -87,7 +87,7 @@ def build_sequence_windows(dataset, type_dataset, echo, K, task,
                            features_dir="results/features", cache_dir="results/timeseries",
                            use_cache=True, transactions=None,
                            time_step=1, time_width=1, time_type="days",
-                           store_dir=None, require_prebuilt=False):
+                           store_dir=None, require_prebuilt=False, mmap_values=False):
     """Windowed sequence dataset in its COMPACT form — the one callers should prefer.
 
     values  float32 [M, F]  each present (snapshot, node) feature row, ONCE (F=90)
@@ -107,6 +107,8 @@ def build_sequence_windows(dataset, type_dataset, echo, K, task,
     per-snapshot feature files (~40 min at AMLWorld scale). `require_prebuilt` turns the last
     two into a hard failure, which is what a GPU job wants: paying that re-assembly with an
     accelerator allocated and idle is the failure mode Stage 1.5 exists to remove.
+    `mmap_values` memory-maps the store's `values` instead of reading it into RAM — for a
+    caller that only needs the rows (idx, y, anchors, nodes), e.g. experiment_GNN.py.
 
     A sample = (node, anchor): for each valid anchor a (nowcast a in [K-1 .. T-1],
     forecast a in [K .. T-1]) and each node present at snapshot a, emit one K-step
@@ -124,9 +126,9 @@ def build_sequence_windows(dataset, type_dataset, echo, K, task,
     from src.data import window_store
 
     if store_dir is not None and window_store.store_exists(store_dir, type_dataset, suffix):
-        # mmap=False: callers gather from `values` many times (once per batch), so it belongs
-        # in RAM rather than being paged out of a memmap on every touch.
-        store = window_store.load_window_store(store_dir, type_dataset, suffix, mmap=False)
+        # mmap=False by default: callers gather from `values` many times (once per batch), so
+        # it belongs in RAM rather than being paged out of a memmap on every touch.
+        store = window_store.load_window_store(store_dir, type_dataset, suffix, mmap=mmap_values)
         return window_store.windows_from_store(store, K, task)
 
     if require_prebuilt:
