@@ -72,7 +72,10 @@ export MKL_NUM_THREADS=$SLURM_CPUS_PER_TASK
 # (train_lstm.slurm, job 62378415). NOTE this job tunes BOTH architectures in 6h by default —
 # if that is tight, fan them out into separate tasks (`sbatch slurm/train_cnn_seq.slurm <Dataset>
 # lstm`, then `transformer`) rather than raising the wall. Studies resume from SQLite on resubmit.
-export SPARTA_WALL_MARGIN_S=3600
+# AMLWorld needs far more than 60 min: a K=7 nowcast trial ran 2 h 09 min (job 62581669, which hit
+# the wall with nothing written) and the final refit of the flat sibling took ~1 h 52 min. Override
+# per submission, e.g. `sbatch --time=12:00:00 --export=ALL,SPARTA_WALL_MARGIN_S=18000 ...`.
+export SPARTA_WALL_MARGIN_S=${SPARTA_WALL_MARGIN_S:-3600}
 
 # Dataset from the submission argument; (timing x K x task) from the array index.
 source slurm/sweep_common.sh
