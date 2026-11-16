@@ -16,13 +16,13 @@ or downstream `config[dataset]` lookups will `KeyError`.
 ### `parameters` — global switches
 | Key | Meaning | Values |
 |-----|---------|--------|
-| `dataset` | Active dataset. Selects the block below and the loader. | `IBM`, `AMLSim`, `Tide` |
+| `dataset` | Active dataset. Selects the block below and the loader. | `AMLWorld`, `AMLSim`, `Tide` |
 | `time_dynamic` | `False` → one static network. `True` → a sequence of time-windowed snapshots. | `True` / `False` |
 
 ### `<dataset>` — per-dataset block (keyed by the active `dataset`)
 | Key | Meaning | Read by |
 |-----|---------|---------|
-| `type_dataset` | Variant passed to the loader; also the output-file prefix. e.g. `HI-Small` (IBM), `AMLSim`, `HI` (Tide → `data/Tide/generated_transactions_HI.csv`). | loaders, output filenames |
+| `type_dataset` | Variant passed to the loader; also the output-file prefix. e.g. `HI-Small` (AMLWorld), `AMLSim`, `HI` (Tide → `data/Tide/generated_transactions_HI.csv`). | loaders, output filenames |
 | `n_channels` | Feature channels per node, reshaped to `(n_channels, 3, 3)` for the CNN. | `experiment_CNN.py` only |
 
 ### `<dataset>.network_construction` — **only used when `time_dynamic: True`**

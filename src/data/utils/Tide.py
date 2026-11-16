@@ -1,3 +1,5 @@
+import os
+
 import pandas as pd
 
 TIDE_COLUMN_MAP = {
@@ -30,7 +32,39 @@ USD_EXCHANGE_RATES = {
 }
 
 
+# The Tide generator's licit traffic stops on 2025-12-31 (that day itself is partial:
+# ~5.8k transactions vs the ~20k daily norm) while laundering chains trickle on into
+# January 2026, leaving trailing days whose edges are ~100% laundering (e.g. the HI
+# 2026-01-06 3-day echo window holds 19 transactions — all 19 laundering). The temporal
+# val/test bands sit on the LATEST anchors, so without a cutoff they land on those
+# degenerate graphs. Trim the tail at load time — both HI and LI share this shape.
+# Mirrors the AMLWorld '<= 2022-09-11' cutoff.
+TIDE_TIMESTAMP_CUTOFF = pd.Timestamp('2025-12-31')
+
+
 def load_transactions_tide(type_dataset='HI'):
+    """Return the canonical Tide transaction frame.
+
+    The raw ``generated_edges_{type}.csv`` is ~900 MB of mostly-unused columns.
+    A pre-processed Parquet (built by ``scripts/convert_tide_to_parquet.py``)
+    holds exactly the canonical schema this loader produces and is ~10x smaller
+    on disk and in RAM — important on the VSC cluster. Prefer it when present;
+    otherwise parse the CSV with the original logic so the repo still works from
+    the raw files alone. Both paths return identical values.
+
+    The degenerate tail is trimmed here (not in the CSV parser) so the Parquet
+    cache stays a faithful slim copy of the raw file and both paths are cut
+    identically.
+    """
+    parquet_path = f'./data/Tide/generated_edges_{type_dataset}.parquet'
+    if os.path.exists(parquet_path):
+        transactions = pd.read_parquet(parquet_path)
+    else:
+        transactions = _load_transactions_tide_from_csv(type_dataset=type_dataset)
+    return transactions[transactions['timestamp'] < TIDE_TIMESTAMP_CUTOFF]
+
+
+def _load_transactions_tide_from_csv(type_dataset='HI'):
     columns = list(TIDE_COLUMN_MAP.keys()) + ['currency', 'edge_type']
     transactions = pd.read_csv(
         f'./data/Tide/generated_edges_{type_dataset}.csv',
@@ -57,9 +91,16 @@ def load_transactions_tide(type_dataset='HI'):
     # Timestamps are mostly second-resolution but a minority carry microseconds
     # (e.g. '...:15.446144'); ISO8601 parses both shapes.
     transactions['timestamp'] = pd.to_datetime(transactions['timestamp'], format='ISO8601')
-    # is_laundering reads back as object-dtype Python bools (the ownership rows
-    # leave blanks in the column); normalise to a clean boolean like IBM/AMLSim.
-    transactions['is_laundering'] = transactions['is_laundering'].astype(bool)
+    # is_laundering reads back as object-dtype Python bools (the ownership rows leave
+    # blanks in the column). A bare .astype(bool) is unsafe: a float NaN is truthy, so a
+    # blank on a *transaction* row would flip to True. Coerce numerically and fill missing
+    # with 0 (fillna MUST precede astype(bool)), mirroring AMLWorld/AMLSim.
+    is_laundering = pd.to_numeric(transactions['is_laundering'], errors='coerce')
+    n_missing = int(is_laundering.isna().sum())
+    if n_missing:
+        print(f"[Tide:{type_dataset}] WARNING: {n_missing} transaction rows have a missing "
+              f"'is_fraudulent' label; treating them as non-laundering (0).")
+    transactions['is_laundering'] = is_laundering.fillna(0).astype(bool)
 
     return transactions
 

@@ -1,28 +1,40 @@
+import math
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
 class NeuralNetwork(nn.Module):
     def __init__(
-            self, 
+            self,
             num_layers: int,
-            input_size: int, 
-            hidden_size: int, 
-            output_size: int
+            input_size: int,
+            hidden_size: int,
+            output_size: int,
+            dropout: float = 0.0
             ):
         super().__init__()
+        # dropout defaults to 0.0 so the static-features path (experiment_features.py), which
+        # does not pass it, is bit-identical to before: at 0.0 NO Dropout layer is inserted, so
+        # the module list and its forward RNG stream are exactly the old ones. The baseline MLP
+        # tunes dropout via Optuna, adding a Dropout after each ReLU only when it is > 0.
         #self.flatten = nn.Flatten() # Flattens the 2D image into a 1D array
         self.layer1 = nn.Linear(input_size, hidden_size)
         self.hidden_layers = nn.ModuleList()
         for _ in range(num_layers - 2):
             self.hidden_layers.append(nn.Linear(hidden_size, hidden_size))
         self.output_layer = nn.Linear(hidden_size, output_size)
-        self.linear_relu_stack = nn.Sequential(
-            self.layer1,
-            nn.ReLU(),
-            *[layer for hidden_layer in self.hidden_layers for layer in (hidden_layer, nn.ReLU())],
-            self.output_layer
-        )
+        # Build the stack explicitly so a fresh Dropout follows each ReLU only when dropout > 0
+        # (at 0.0 the list is exactly [Linear, ReLU, (Linear, ReLU)*, Linear] as before).
+        layers = [self.layer1, nn.ReLU()]
+        if dropout > 0:
+            layers.append(nn.Dropout(dropout))
+        for hidden_layer in self.hidden_layers:
+            layers.extend([hidden_layer, nn.ReLU()])
+            if dropout > 0:
+                layers.append(nn.Dropout(dropout))
+        layers.append(self.output_layer)
+        self.linear_relu_stack = nn.Sequential(*layers)
 
     def forward(self, x):
         logits = self.linear_relu_stack(x)
@@ -137,3 +149,128 @@ class CNN_visual_VGG16(nn.Module):
         x = self.fc3(x)
 
         return x.squeeze()
+
+# --- Time-series models (SPaRTA snapshots) --------------------------------
+class PositionalEncoding(nn.Module):
+    def __init__(self, d_model, max_len=512):
+        super().__init__()
+        pe = torch.zeros(max_len, d_model)
+        pos = torch.arange(max_len).unsqueeze(1).float()
+        div = torch.exp(torch.arange(0, d_model, 2).float() * (-math.log(10000.0) / d_model))
+        pe[:, 0::2] = torch.sin(pos * div)
+        pe[:, 1::2] = torch.cos(pos * div)
+        self.register_buffer("pe", pe.unsqueeze(0))   # (1, max_len, d_model)
+
+    def forward(self, x):
+        return x + self.pe[:, : x.size(1)]
+
+
+class LSTMClassifier(nn.Module):
+    def __init__(self, n_features=90, hidden=32, num_layers=1, dropout=0.3):
+        super().__init__()
+        self.lstm = nn.LSTM(n_features, hidden, num_layers, batch_first=True,
+                            dropout=(dropout if num_layers > 1 else 0.0))
+        self.drop = nn.Dropout(dropout)           # regularize the last-step hidden state
+        self.head = nn.Linear(hidden, 1)
+
+    def forward(self, x, mask):                  # x:(B,T,F)  mask:(B,T) bool
+        out, _ = self.lstm(x)                     # (B,T,H); padded steps fed as zeros
+        last = mask.float().cumsum(1).argmax(1)   # index of the last valid (True) step
+        idx = last.view(-1, 1, 1).expand(-1, 1, out.size(-1))
+        h = out.gather(1, idx).squeeze(1)         # (B,H) hidden state at last valid step
+        return self.head(self.drop(h)).squeeze(-1)
+
+
+class TransformerClassifier(nn.Module):
+    def __init__(self, n_features=90, head_dim=8, nhead=4, num_layers=1,
+                 dim_feedforward=None, dropout=0.2):
+        super().__init__()
+        d_model = head_dim * nhead                # ensures d_model % nhead == 0
+        self.proj = nn.Linear(n_features, d_model)
+        self.pe = PositionalEncoding(d_model)
+        layer = nn.TransformerEncoderLayer(d_model, nhead,
+                                           dim_feedforward=(dim_feedforward or 2 * d_model),
+                                           dropout=dropout, batch_first=True)
+        # enable_nested_tensor=False: the padding-mask nested-tensor fast path uses an op
+        # (_nested_tensor_from_mask_left_aligned) unimplemented on MPS, so eval() forward
+        # crashes on Apple Silicon. Disabling it costs nothing for tiny K and runs everywhere.
+        self.encoder = nn.TransformerEncoder(layer, num_layers, enable_nested_tensor=False)
+        self.drop = nn.Dropout(dropout)                   # regularize the pooled representation
+        self.head = nn.Linear(d_model, 1)
+
+    def forward(self, x, mask):                       # mask:(B,T) True = valid
+        h = self.pe(self.proj(x))
+        h = self.encoder(h, src_key_padding_mask=~mask)   # True = ignore this position
+        m = mask.float().unsqueeze(-1)
+        h = (h * m).sum(1) / m.sum(1).clamp(min=1)        # mean-pool over valid tokens
+        return self.head(self.drop(h)).squeeze(-1)
+
+class FrameEncoder(nn.Module):
+    """Per-frame CNN: one (C, 3, 3) SPaRTA picture -> an `emb_dim` embedding.
+
+    Conv stack (kernel 2-3, padding='same', ReLU) keeps the 3x3 grid, then the flattened
+    feature map goes through one linear layer to the embedding. The same weights are applied
+    to every time step (a TimeDistributed CNN), so the sequence model sees one embedding per
+    snapshot. `C = n_features // 9` (10 for the 90-feature layout: density, size and the eight
+    transaction-summary channels, each a row-major 3x3 grid)."""
+    def __init__(self, n_features=90, hidden_channels=16, num_layers=2, kernel_size=3,
+                 emb_dim=32):
+        super().__init__()
+        if n_features % 9:
+            raise ValueError(f"n_features={n_features} is not a whole number of 3x3 channels")
+        self.n_channels = n_features // 9
+        layers, c_in = [], self.n_channels
+        for _ in range(num_layers):
+            layers += [nn.Conv2d(c_in, hidden_channels, kernel_size, padding='same'), nn.ReLU()]
+            c_in = hidden_channels
+        self.conv = nn.Sequential(*layers)
+        self.fc = nn.Linear(hidden_channels * 3 * 3, emb_dim)
+
+    def forward(self, x):                        # x:(N, C*9) flat frames
+        x = x.view(-1, self.n_channels, 3, 3)
+        x = self.conv(x)
+        return F.relu(self.fc(torch.flatten(x, 1)))
+
+
+class CNNSequenceClassifier(nn.Module):
+    """SPaRTA architecture: per-frame CNN embeddings -> sequence model -> linear head.
+
+    `body` is an LSTMClassifier / TransformerClassifier built with n_features=emb_dim, so the
+    padding/masking behaviour (last valid step for the LSTM, masked mean-pool for the
+    Transformer) is exactly that of the flat models. Only VALID frames go through the CNN;
+    padded steps get an all-zero embedding, mirroring the zero input the flat models see."""
+    def __init__(self, encoder, body, emb_dim):
+        super().__init__()
+        self.encoder = encoder
+        self.body = body
+        self.emb_dim = emb_dim
+
+    def forward(self, x, mask):                  # x:(B,T,F)  mask:(B,T) bool
+        B, T, _ = x.shape
+        z = x.new_zeros(B, T, self.emb_dim)
+        z[mask] = self.encoder(x[mask])
+        return self.body(z, mask)
+
+
+class GraphSAGE(nn.Module):
+    """GraphSAGE node classifier (Hamilton et al., 2017), the GNN baseline of GARG-AML.
+
+    `num_layers` SAGEConv layers (mean aggregation, root weight) of width `hidden`, each followed
+    by ReLU and dropout, then a linear head giving one logit per node. The depth IS the receptive
+    field: 1 layer sees the direct counterparties, 2 layers the second-order neighbourhood a SPaRTA
+    frame is built from. Every depth gets the same per-hop width and the same head, so going from
+    1 to 2 layers adds exactly one hop of information. torch_geometric is imported here rather
+    than at module level, so the other models keep working in an env without PyG."""
+    def __init__(self, in_channels=1, hidden=64, num_layers=2, dropout=0.2):
+        super().__init__()
+        from torch_geometric.nn import SAGEConv
+        self.convs = nn.ModuleList(
+            SAGEConv(in_channels if i == 0 else hidden, hidden) for i in range(num_layers))
+        self.dropout = dropout
+        self.head = nn.Linear(hidden, 1)
+
+    def forward(self, x, edge_index):
+        for conv in self.convs:
+            x = F.relu(conv(x, edge_index))
+            x = F.dropout(x, p=self.dropout, training=self.training)
+        return self.head(x).squeeze(-1)

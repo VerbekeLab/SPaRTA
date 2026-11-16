@@ -6,12 +6,14 @@ sys.path.append(DIR)
 
 import warnings; warnings.simplefilter('ignore')
 
+import gc
 import pandas as pd
 from tqdm import tqdm
 from multiprocessing import Pool, cpu_count
 
-from src.utils.setup import load_config
+from src.utils.setup import load_config, resolve_dataset, resolve_dynamic, resolve_timing, run_tag
 from src.utils.graph_processing import graph_community
+from src.utils.feature_io import find_table, save_table
 
 from src.data.network_data_loader import *
 from src.data.utils.dates import define_dates
@@ -75,60 +77,119 @@ def process_graph(G):
     G_rev = G_reduced.reverse(copy=True)
 
     nodes = list(G_reduced.nodes)
-    chunksize = max(1, len(nodes) // (n_cpu * 10))
+    # Keep chunks small so imap hands results back frequently: a large chunksize
+    # makes a worker finish its whole chunk before returning anything, so tqdm
+    # only advances in big bursts (and the first update stalls until the first
+    # full chunk completes). ~200 chunks/worker gives a smooth bar; the per-result
+    # IPC cost is negligible for these lightweight tuples.
+    chunksize = max(1, len(nodes) // (n_cpu * 200))
     print(f"Number of nodes: {len(nodes)} | Using {n_cpu} processes")
     with Pool(
         processes=n_cpu,
         initializer=init_worker,
         initargs=(G_reduced, G_rev, G_und,)
     ) as pool:
-        results = list(tqdm(pool.imap(process_node, nodes, chunksize=chunksize), total=len(nodes)))
+        # imap_unordered surfaces each chunk as soon as ANY worker finishes it
+        # (ordered imap would block on chunk 0 even if later chunks are ready).
+        # Order is irrelevant here: every row embeds its own node id (see process_node).
+        results = list(tqdm(pool.imap_unordered(process_node, nodes, chunksize=chunksize), total=len(nodes)))
 
     return pd.DataFrame(results, columns=['node'] + keys_to_include)
 
 if __name__ == "__main__":
-    os.makedirs('results', exist_ok=True)
+    # Own our output directory instead of relying on the Slurm wrapper's mkdir: the
+    # static branch below writes straight into 'results/features' with no further
+    # makedirs, so it must exist here regardless of where/how this script is invoked.
+    os.makedirs('results/features', exist_ok=True)
     data_config = load_config("config/data/config.yaml")
     method_config = load_config("config/methods/config.yaml")
 
-    network = data_config['parameters']['dataset']
+    network = resolve_dataset(data_config)
     type_dataset = data_config[network]['type_dataset']
-    dynamic = data_config['parameters']['time_dynamic']
+    dynamic = resolve_dynamic(data_config)
 
     if dynamic:
-        time_step=data_config[network]['network_construction']['time_step']
-        time_width=data_config[network]['network_construction']['time_width']
-        time_type=data_config[network]['network_construction']['time_type']
+        # SPARTA_* env vars let one Slurm array task pick a timing combo without editing
+        # the YAML (see resolve_timing); run_tag namespaces this combo's output dir so a
+        # sweep's combos coexist in results/features/<tag>/ instead of overwriting.
+        timing = resolve_timing(data_config, network)
+        time_step = timing['time_step']
+        time_width = timing['time_width']
+        time_type = timing['time_type']
 
-        echo = data_config[network]['network_construction']['echo']
-        days_echo = data_config[network]['network_construction']['days_echo']
+        echo = timing['echo']
+        days_echo = timing['days_echo']
 
-    if network in ('IBM', 'AMLSim', 'Tide'):
+        out_dir = os.path.join("results/features", run_tag(timing))
+
+    if network in ('AMLWorld', 'AMLSim', 'Tide'):
         if dynamic:
+            # Load the transactions ONCE and share the frame between the date grid and
+            # the snapshot generator. The old eager construct_network_time re-read the
+            # raw files for every window AND kept all ~370 snapshot graphs alive at
+            # once, which got long runs OOM-killed by Slurm.
+            transactions = load_transactions(network, type_dataset=type_dataset)
             start_dates, end_dates = define_dates(
-                load_transactions(network, type_dataset=type_dataset)['timestamp'],
+                transactions['timestamp'],
                 time_step=time_step,
                 time_width=time_width,
                 time_type=time_type
             )
+            n_snapshots = len(start_dates)
 
-            networks = construct_network_time(start_dates, end_dates, dataset=network, type_dataset=type_dataset, echo=echo, days_echo=days_echo)
-            for i in range(len(networks)):
-                print(f"Processing dynamic network snapshot {i+1}/{len(networks)}...")
-                G, labels = networks[i]
+            os.makedirs(out_dir, exist_ok=True)
+
+            # RESUME: skip snapshots already on disk. Filtering the DATE GRID (not the loop
+            # body) is what makes it free — the generator builds each graph BEFORE the body
+            # runs, so a body-level `continue` would still pay construction for every window.
+            # BOTH tables must be present: a kill between the two writes leaves a snapshot
+            # with no labels, which _load_snapshot rejects. find_table (not os.path.exists)
+            # so a legacy .csv run counts as done, and save_table writes atomically so a
+            # present file is a complete one. This is what lets a wall-time-killed extraction
+            # finish by resubmission instead of restarting from snapshot 0.
+            suffix = "_echo" if echo else ""
+            stem = lambda i, kind: os.path.join(out_dir, f"{type_dataset}_dynamic_{i}_{kind}{suffix}")
+            pending = [i for i in range(n_snapshots)
+                       if find_table(stem(i, "features")) is None
+                       or find_table(stem(i, "labels")) is None]
+            if not pending:
+                print(f"All {n_snapshots} snapshots already extracted in {out_dir} — nothing to do.")
+            elif len(pending) < n_snapshots:
+                print(f"Resuming: {n_snapshots - len(pending)}/{n_snapshots} snapshots already "
+                      f"in {out_dir}; building {len(pending)}.")
+
+            networks_iter = construct_network_time_iter(
+                [start_dates[i] for i in pending], [end_dates[i] for i in pending],
+                dataset=network, type_dataset=type_dataset,
+                echo=echo, days_echo=days_echo, transactions=transactions
+            )
+            # Manual counter, NOT enumerate(): CPython's enumerate (and zip) reuse
+            # their cached result tuple, which keeps a strong ref to the PREVIOUS
+            # (G, labels) until AFTER the generator has built the next snapshot —
+            # holding two graphs resident and defeating the del/gc below.
+            pos = -1
+            for G, labels in networks_iter:
+                pos += 1
+                # The SNAPSHOT index, not the loop position: filenames encode it and
+                # _load_snapshot reads range(T) contiguously, so it must not shift.
+                i = pending[pos]
+                print(f"Processing dynamic network snapshot {i+1}/{n_snapshots}...")
                 df = process_graph(G)
 
-                if echo:
-                    out_path_features = f"results/features/{type_dataset}_dynamic_{i}_features_echo_t.csv"
-                    out_path_labels = f"results/features/{type_dataset}_dynamic_{i}_labels_echo_t.csv"
-                else:
-                    out_path_features = f"results/features/{type_dataset}_dynamic_{i}_features_t.csv"
-                    out_path_labels = f"results/features/{type_dataset}_dynamic_{i}_labels_t.csv"
+                stem_features = stem(i, "features")
+                stem_labels = stem(i, "labels")
 
-                df.to_csv(out_path_features, index=False)
+                out_path_features = save_table(df, stem_features)
                 print(f"Results saved to {out_path_features}")
-                labels.to_csv(out_path_labels)
+                # reset_index() keeps the Account index as the first column, matching
+                # the (index-writing) to_csv layout the legacy label files carry.
+                out_path_labels = save_table(labels.reset_index(), stem_labels)
                 print(f"Labels saved to {out_path_labels}")
+
+                # Free this snapshot before the generator builds the next one — the
+                # loop variables would otherwise keep the old graph alive alongside it.
+                del G, labels, df
+                gc.collect()
 
 
         else:
@@ -136,11 +197,9 @@ if __name__ == "__main__":
             G, labels = construct_network(dataset=network, type_dataset=type_dataset)
             df = process_graph(G)
 
-            out_path_features = f"results/features/{type_dataset}_static_features_t.csv"
-            df.to_csv(out_path_features, index=False)
+            out_path_features = save_table(df, f"results/features/{type_dataset}_static_features")
             print(f"Results saved to {out_path_features}")
-            out_path_labels = f"results/features/{type_dataset}_static_labels_t.csv"
-            labels.to_csv(out_path_labels)
+            out_path_labels = save_table(labels.reset_index(), f"results/features/{type_dataset}_static_labels")
             print(f"Labels saved to {out_path_labels}")
 
     else:

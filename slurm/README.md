@@ -1,0 +1,297 @@
+# SPaRTA SLURM runbook — run + tune all models, with a timing sweep
+
+All jobs are Slurm scripts for VSC (preset to `--clusters=wice --account=lp_verbekelab`;
+change those headers + the `miniconda3` path if your setup differs). They select what to run
+via `SPARTA_*` env vars (see `src/utils/setup.py`: `resolve_dataset`, `resolve_dynamic`,
+`resolve_timing`, `resolve_sequence`, `run_tag`) — **no edits to `config/*.yaml` are needed
+for the sweep**. Run from the repo root. Logs land in `slurm/logs/` (created on submit).
+
+## One dataset per submission
+
+Every extraction/training script takes the **dataset as its submission argument**, so the
+three datasets run as separate jobs (one whole-sweep submission was too long for the VSC
+wall-time limits):
+
+```bash
+sbatch slurm/extract_features_dynamic.slurm AMLWorld
+sbatch slurm/extract_features_dynamic.slurm AMLSim
+sbatch slurm/extract_features_dynamic.slurm Tide
+```
+
+Valid names: `AMLWorld`, `AMLSim`, `Tide` (the `DATASETS` list in `sweep_common.sh`).
+Omitting or misspelling the argument fails the job immediately with a usage message.
+Alternatively pass it as an env var: `sbatch --export=ALL,SPARTA_DATASET=Tide <script>`.
+Each dataset is fully independent — submit them all at once, on different days, or only
+re-run the one that failed.
+
+## The sweep grid (edit in ONE place: `slurm/sweep_common.sh`)
+
+- **Datasets:** AMLWorld, AMLSim, Tide — chosen per submission, NOT part of the arrays.
+- **Per-dataset grids** — each dataset sweeps around its own defaults from
+  `config/data/config.yaml`, because the spans and laundering-pattern durations differ
+  (measured in `notebooks/pattern_durations.ipynb`). Timing combos are the expensive axis
+  (one feature re-extraction each; tag = output namespace); K/task are free (re-windowed
+  from the same snapshots):
+
+  | Dataset  | Snapshot grid | Timing combos (tags)                        | K            |
+  |----------|---------------|---------------------------------------------|--------------|
+  | AMLWorld | 6-hour step   | `h6_echo1`, `h6_echo2`, `h6_w6`, `h6_w24`   | 7, **13**, 17 |
+  | AMLSim   | daily step    | `d1_echo3`, `d1_echo7`, `d1_w1`, `d1_w3`    | 3, **7**, 9  |
+  | Tide     | 2-day step    | `d2_echo3`, `d2_echo7`, `d2_w2`, `d2_w3`    | 3, **5**, 7  |
+
+  Bold = the YAML default. `task ∈ {nowcast, forecast}` for all. Within a dataset the
+  snapshot count `T` is constant across its combos, so its K-windows stay comparable.
+  The val/test bands (`n_val/n_test_anchors`) are not swept — they come from the YAML.
+- **Axis sizes are identical across datasets** (4 timing × 3 K × 2 tasks), so one
+  `--array` range fits all three.
+
+`bash slurm/sweep_common.sh` prints the per-dataset array ranges. After editing the grid,
+update each script's `--array` range to match (the dynamic scripts source this file, so the
+grid itself stays in lockstep — only the `#SBATCH --array=` line is hand-kept):
+
+- `extract_features_dynamic.slurm`: `0-3` (timing combos)
+- `build_windows.slurm`: `0-3` (timing combos — K/task are free re-slices of one store)
+- `train_lstm.slurm` / `train_cnn_seq.slurm` / `train_baseline.slurm` / `train_baseline_nn.slurm`: `0-23` (timing × K × task)
+- `train_local.slurm` / `train_local_nn.slurm`: `1-23:2` (the forecast half of the same grid)
+- `train_gnn.slurm`: `0-23` (same grid; both GraphSAGE depths in one task)
+- `extract_features.slurm`, `train_features.slurm`, `train_cnn.slurm`: no array (one job = one dataset)
+
+## What depends on what
+
+- **Static models** (`experiment_features.py` = LogReg/XGB/NN, `experiment_CNN.py`) are
+  **timing-independent** → static features extracted once per dataset.
+- **Dynamic models** (`experiment_LSTM.py` = LSTM/Transformer, `experiment_baseline.py` =
+  XGB/MLP/IsolationForest) read `results/features/<tag>/` → one run per (tag × K × task),
+  per dataset. The MLP is split into its own GPU script, `train_baseline_nn.slurm` — on
+  these window sizes (millions of rows) mini-batch training is far slower per Optuna trial
+  than XGBoost's single tree fit, and needs the GPU + bigger batches that `train_baseline.slurm`
+  (CPU, XGBoost + IsolationForest only) doesn't provide. See `train_baseline_nn.slurm`'s header.
+  LSTM and Transformer share the same GPU resources, so `train_lstm.slurm` tunes both
+  sequentially by default; pass `lstm` or `transformer` as a 2nd arg (or set
+  `SPARTA_SEQ_MODELS`) to fan them into separate concurrent tasks instead — see that
+  script's header.
+  `train_cnn_seq.slurm` (`experiment_CNN_LSTM.py`) runs the SPaRTA architecture — a per-frame CNN
+  embedding feeding the same LSTM / Transformer — on identical windows and protocol; its per-arch
+  fan-out (`lstm` / `transformer`, or `SPARTA_CNN_SEQ_MODELS`) is recommended since trials are slower
+  than the flat models'.
+  `train_local.slurm` (CPU: XGBoost + IsolationForest) / `train_local_nn.slurm` (GPU: MLP) run the
+  **local view** — `experiment_baseline.py` with `SPARTA_BASELINE_VIEW=local`: the same rows and
+  split as each window cell, but only the last window step's 90 features. Forecast-only, because
+  the nowcast window baseline already reads just the anchor snapshot (it *is* the local nowcast);
+  hence `--array=1-23:2`, the odd = forecast cells. Separate `local_*` studies and `*_local*.txt`
+  dumps, so it never resumes or overwrites the window baseline's.
+  `train_gnn.slurm` (GPU, `experiment_GNN.py`) runs **GraphSAGE** as in GARG-AML: log(1 + degree)
+  as the only node feature, a 1- and a 2-layer model (one vs two hops), fixed hyperparameters (the
+  `gnn` config block, no Optuna). Same rows and split as each window cell; the graph is the anchor
+  snapshot's (nowcast) or the one before (forecast), rebuilt from the raw transactions, so it needs
+  `data/` as well as the window store, and `torch_geometric` + `pyg-lib` (see `environment.txt`).
+  All 24 cells; dumps `*_gnn.txt` with models `GraphSAGE-1L` / `GraphSAGE-2L`.
+- **Stage 1.5, `build_windows.slurm`** sits between them. The stacked snapshot block a
+  window build needs depends on the **tag alone**, not on K or the task, so it is built once
+  per tag (4 CPU tasks) into a prebuilt *window store* (`src/data/window_store.py`); each of
+  that tag's 6 (K × task) training cells then derives its own windows from it by index
+  arithmetic in seconds. Without it every cell re-read the feature files and re-assembled the
+  block itself — ~40 min of single-threaded pandas, **two of the six on a GPU node**. The GPU
+  scripts therefore set `SPARTA_REQUIRE_WINDOWS=1`: a missing store fails them in seconds
+  instead of quietly paying that cost with an A100 idle. Store location follows
+  `resolve_window_store_dir` (`$VSC_SCRATCH/SPaRTA/windows/<tag>` on VSC);
+  `SPARTA_WINDOW_STORE=off` disables it and restores the old in-job build.
+
+## Submission order (per dataset)
+
+```bash
+cd $VSC_DATA/SPaRTA
+DS=AMLWorld           # then repeat the block with AMLSim, Tide
+
+# 1. Feature extraction (the expensive stage) — static + dynamic can run in parallel.
+EXTRACT_STATIC=$(sbatch --parsable slurm/extract_features.slurm $DS)          # 1 task  (static)
+EXTRACT_DYN=$(sbatch --parsable slurm/extract_features_dynamic.slurm $DS)     # 4 tasks (dynamic sweep)
+
+# 1.5 Window store — one per tag, on CPU. Every dynamic training cell reads this instead of
+#     re-assembling windows from the feature files (~40 min each, two of them on a GPU).
+WINDOWS=$(sbatch --parsable --dependency=afterok:$EXTRACT_DYN slurm/build_windows.slurm $DS)  # 4 tasks (CPU)
+
+# 2. Training — each depends on ITS dataset's extraction (afterok = only if extraction ok).
+#    Static models depend on the static extraction:
+sbatch --dependency=afterok:$EXTRACT_STATIC slurm/train_features.slurm $DS    # 1 task   (CPU)
+sbatch --dependency=afterok:$EXTRACT_STATIC slurm/train_cnn.slurm $DS         # 1 task   (GPU)
+#    Dynamic models depend on the WINDOW STORE (which already depends on the extraction):
+LSTM=$(sbatch --parsable --dependency=afterok:$WINDOWS slurm/train_lstm.slurm $DS)        # 24 (GPU)
+CNNSEQ=$(sbatch --parsable --dependency=afterok:$WINDOWS slurm/train_cnn_seq.slurm $DS)    # 24 (GPU: CNN->LSTM/Transformer)
+BASE=$(sbatch --parsable --dependency=afterok:$WINDOWS slurm/train_baseline.slurm $DS)    # 24 (CPU: XGBoost + IsolationForest)
+BASE_NN=$(sbatch --parsable --dependency=afterok:$WINDOWS slurm/train_baseline_nn.slurm $DS) # 24 (GPU: MLP)
+LOCAL=$(sbatch --parsable --dependency=afterok:$WINDOWS slurm/train_local.slurm $DS)      # 12 (CPU: local XGBoost + IForest, forecast)
+LOCAL_NN=$(sbatch --parsable --dependency=afterok:$WINDOWS slurm/train_local_nn.slurm $DS) # 12 (GPU: local MLP, forecast)
+GNN=$(sbatch --parsable --dependency=afterok:$WINDOWS slurm/train_gnn.slurm $DS)          # 24 (GPU: GraphSAGE 1 + 2 layers)
+```
+
+Once the training jobs of **all datasets you care about** have finished, aggregate
+everything into `results/experiments/summary.csv` (afterany: don't let an infeasible
+per-combo cell block the summary — it's reported as a gap instead):
+
+```bash
+# collect all LSTM/baseline job ids across the datasets you ran, e.g.:
+sbatch --dependency=afterany:$LSTM_AMLWORLD:$BASE_AMLWORLD:$BASE_NN_AMLWORLD:$LSTM_AMLSIM:$BASE_AMLSIM:$BASE_NN_AMLSIM:$LSTM_TIDE:$BASE_TIDE:$BASE_NN_TIDE slurm/collect.slurm
+```
+
+`collect.slurm` needs no dataset argument — it sweeps whatever per-combo outputs exist in
+`results/`, so you can also run it after each dataset for a partial summary; missing cells
+are reported as gaps. It also picks up the static `train_features` / `train_cnn` outputs if
+they have finished; to force it strictly after those too, add their job ids to its
+`--dependency`.
+
+Tips: append a throttle to a training script's `--array` (e.g. `0-23%4`) to cap concurrent
+tasks — submitting all three datasets' GPU sweeps unthrottled is 216 tasks each wanting its
+own A100, which queues for hours and depresses your fair-share priority. `squeue -M wice -u
+$USER -o "%.14i %.26j %.9T %.11M %R"` shows the pending REASON, which distinguishes genuine
+contention (`Priority`/`Resources`) from a per-user GPU cap (`AssocGrpGpuLimit`).
+
+Because `decode_train` puts task on the fastest axis, EVEN array indices are `nowcast` and ODD
+are `forecast`, and the two differ by ~5x in memory and ~6x in per-epoch compute (nowcast
+input is 90 features, forecast is K*90). Splitting the submission stops the nowcast half
+over-requesting — and since wice allocates cores in proportion to the memory share, a smaller
+`--mem` also shrinks the core count these single-process jobs leave idle:
+
+```bash
+sbatch --mem=20G --time=04:00:00 --array=0-22:2%4 slurm/train_baseline_nn.slurm $DS  # nowcast
+sbatch                           --array=1-23:2%4 slurm/train_baseline_nn.slurm $DS  # forecast
+```
+
+**Keep the GPUs busy: pack cells with `pack_gpu.slurm`.** The training cells are single-process,
+launch-bound loops that use a small share of an A100 (VSC flagged one at 5% utilisation / 6 GB
+VRAM and blocks accounts that keep doing this), so one cell per GPU is wasteful — and a bigger
+GPU (H100) only makes the share smaller. `pack_gpu.slurm` holds ONE GPU and runs `PACK` (default
+4) cells concurrently by running the unchanged inner script once per cell:
+
+```bash
+sbatch --array=0-5 slurm/pack_gpu.slurm slurm/train_lstm.slurm    $DS lstm          # 24 cells / 4
+sbatch --array=0-5 slurm/pack_gpu.slurm slurm/train_cnn_seq.slurm $DS transformer
+# nowcast-only baseline MLP (small, ~12 GB each): all EVEN cells, 4 per job
+sbatch --array=0-2 --mem=64G --export=ALL,PACK_CELLS=0,2,4,6,8,10,12,14,16,18,20,22 \
+       slurm/pack_gpu.slurm slurm/train_baseline_nn.slurm $DS
+```
+
+Validate before the full sweep: submit ONE pack task (`--array=0`, optionally
+`--partition=gpu_a100_debug --time=00:40:00`) and read the last lines of its `.out`: it prints
+the GPU's mean/max utilisation and peak VRAM (also sampled in `slurm/logs/gpu_<jobid>.csv`). If
+the mean is still low, raise `PACK`/`--cpus-per-task`/`--mem` together. All packed cells share the
+job's wall time, so each does fewer trials per job; resubmit top-ups via `missing_runs.sh`.
+The `pack_gpu.slurm` header lists the knobs and sizing (forecast baseline-MLP cells need ~53 GB
+each — pack at most 2). The conda env's PyTorch (2.9.1+cu128) has kernels for sm_70+ only, so
+P100s (sm_60) cannot be used; V100/A100/H100 can. To let pending wice jobs start on whichever of
+A100/H100 frees first: `scontrol update -M wice JobId=<id> Partition=gpu_a100,gpu_h100`.
+
+**Wall times are capped at 6 h** across every script (queue priority; the old 24 h requests
+were also what the VSC resource-usage warnings flagged). The Optuna jobs absorb that fine —
+each study persists to SQLite, stops starting trials `SPARTA_WALL_MARGIN_S` before the kill,
+and tops its trial count up on resubmit (`bash slurm/missing_runs.sh` lists which cells still
+need one). The **dynamic extraction** resumes too: `measure_calculation.py` skips snapshots
+whose feature *and* label tables are already on disk (`find_table`, so legacy `.csv` runs
+count), and `save_table` writes to a temp file + `os.replace`, so a file that exists is
+complete rather than a truncated `.parquet` a kill left behind. Resubmit it until it reports
+`nothing to do`.
+
+Three things still do NOT resume, so a 6 h kill loses their work: the **static** extraction
+(`extract_features.slurm` / `_sequential.slurm` — one network, no per-snapshot granularity),
+`render_pictures.slurm`, and `train_vgg16.slurm` (no checkpointing). Reduce the work per
+submission rather than resubmitting those.
+
+## Failed / timed-out tasks: what to resubmit
+
+Every Optuna study's SQLite in `results/tuning/` is **kept** — nothing deletes it after a
+completed run. So a resubmitted task never retunes from scratch: it reopens the study, sees the
+budget already spent, logs `[optuna] <study>: 50/50 trials already in storage -- skipping
+tuning`, and goes straight to the final refit + metrics dump. An accidental duplicate
+submission therefore costs one refit, not a full search. Resubmitting a whole training array is
+still wasteful (every cell redoes its refit and rewrites its outputs), so to find the actual
+gaps run
+
+```bash
+bash slurm/missing_runs.sh            # all datasets; or: bash slurm/missing_runs.sh AMLSim
+```
+
+from the repo root (on the cluster — it audits `results/` on disk, not Slurm exit codes).
+For every model it lists, per dataset, the array indices that are **missing** (task crashed
+or never ran — no `Model:` block in any `results/experiments/` dump) or need a **top-up**
+(metrics written, but the study's `results/tuning/*.db` holds fewer than `n_trials` finished
+trials, i.e. the walltime timeout stopped it short), and prints the exact `sbatch --array=...
+<script> <Dataset> <model>` command for each gap. Cells it does not list are complete. A third
+bucket, **unknown?**, means the trial count could not be read (no `sqlite3` on `PATH` — load
+the conda env — or an unreadable `.db`); no command is printed for those, so check them by hand.
+Resubmitted tasks resume their studies from the per-study SQLite and rewrite the outputs. To
+find out *why* a task died, check its `slurm/logs/*_<jobid>_<idx>.err` or
+`sacct -M wice -j <jobid> --format=JobID%20,State,ExitCode`.
+
+Studies do still need a manual reset in one case: **changing a `search_space` categorical**
+(Optuna rejects a changed `CategoricalDistribution`). Delete the affected
+`results/tuning/*.db` before resubmitting, as the `config/methods/config.yaml` comments note.
+
+## Limited disk: stage one dataset at a time
+
+`extract_features_sequential.slurm` is the static extraction with a symlink stage-in/out
+from an external `STAGE_ROOT` (`data/` stays read-only — only a transient symlink is created
+and removed). It takes the dataset argument like the others; chain submissions with
+`--dependency=afterany:<prev>` to guarantee only one dataset is on disk at a time (the
+header shows the exact three-liner). For the dynamic sweep under the same constraint, copy
+its staging block into `extract_features_dynamic.slurm` and append `%1` to that array.
+
+## Optional VGG16 track (separate — AMLWorld HI-Small only, untuned)
+
+Not part of the timing sweep: `visualising_network.py` hardcodes AMLWorld + a static graph,
+and `experiment_pictures.py` has no HPO (fixed 10 epochs). No dataset argument.
+
+```bash
+RENDER=$(sbatch --parsable slurm/render_pictures.slurm)                   # CPU, heavy
+sbatch --dependency=afterok:$RENDER slurm/train_vgg16.slurm               # GPU, 10 epochs, no HPO
+```
+
+VGG16 writes only a model file (no metrics dump), so it does **not** appear in `summary.csv`.
+
+## Test-set predictions and re-scoring (extra metrics without retraining)
+
+Every experiment script now also writes `results/predictions/<same basename as the metrics .txt>.parquet`:
+`y_true`, `anchor`/`node` of each test row, and one `score_<model>` column per model. Any further
+metric (precision@k, recall@k, lift, F1 at a threshold, calibration, bootstrap CIs, paired tests
+between models) is then an offline calculation on those tables. The ROC/PR arrays in the metrics
+`.txt` files are **not** usable for this: numpy truncates them with `...` past 1000 elements.
+`python scripts/extra_metrics.py` turns the tables into `results/experiments/extra_metrics.csv` (same key
+columns as `summary.csv`): **F1@0.5** (fixed cut-off `score >= 0.5`; arbitrary for IsolationForest's
+anomaly scores), **best-F1** (max over thresholds on the test band, an oracle/optimistic operating
+point, not a deployable F1) with its threshold/precision/recall, and **precision@100** (`--ks`, `--fracs`,
+`--r-precision` add more). On VSC: `sbatch slurm/extra_metrics.slurm`.
+Static runs write one table per dataset (`{type}_features.parquet`, `{type}_CNN.parquet`).
+
+Cells finished **before** this existed are backfilled with `SPARTA_RESCORE=1`: the same job, same
+env, but no Optuna and no training. Sequence/CNN models reload their `.pt`; XGBoost / MLP are
+refit once from the stored `results/tuning/*_best_params.json`; IsolationForest is refit (fixed
+params). Metrics `.txt` / params JSON are left untouched, and the reproduced AUC-PR / AUC-ROC are
+printed next to the stored ones (`MATCH` / `DIFF`) as a check. `sbatch` forwards the env, so:
+
+```bash
+python scripts/missing_predictions.py --list                    # what still lacks a table
+SPARTA_RESCORE=1 sbatch --time=01:00:00 slurm/train_lstm.slurm AMLWorld lstm   # GPU, minutes
+SPARTA_RESCORE=1 sbatch --time=02:00:00 slurm/train_baseline.slurm AMLWorld xgboost
+```
+
+Use the **same fan-out selection** as the original run (the model argument /
+`SPARTA_*_MODELS`), because the predictions file takes the metrics file's suffix. The GPU scripts
+still need the window store (`SPARTA_REQUIRE_WINDOWS=1`). Expect exact matches for XGBoost,
+IsolationForest and reloaded checkpoints (to ~1e-5 across devices); the refit MLP, static
+LogisticRegression (lbfgs hits `max_iter`) and static NN (weight init was unseeded before this
+change) may show `DIFF` — their saved scores are then those of the refit, not of the run behind the old `.txt`.
+VGG16 is not covered.
+
+## Outputs
+
+- `results/features/<tag>/{type}_dynamic_{i}_features_echo.parquet` — per-combo dynamic
+  features (`_w` combos drop the `_echo` suffix; readers also accept legacy `.csv`).
+- `results/features/{type}_static_features.parquet` — static features (flat, shared).
+- `results/timeseries/<tag>/…npz` — per-combo windowed cache (the tag kills the stale-cache bug).
+- `results/experiments/{type}_{tag}_K{K}_{task}_{timeseries|cnnseq|baselines|local|gnn}.txt|.png` — per-combo metrics.
+- `results/experiments/{type}_CNN.txt|.png` — static CNN test metrics (timing-independent).
+- `results/tuning/…_best_params.json` — best HPs (+ val AUC-PR where tuned) per combo / model.
+- `results/models/{LSTM|Transformer|GraphSAGE-1L|GraphSAGE-2L}_{type}_{tag}_K{K}_{task}.pt`, `results/models/CNN_{type}.pt` —
+  saved checkpoints (state_dict + best params). XGBoost/MLP/IsolationForest are not checkpointed
+  (re-scored by refit, see above).
+- `results/predictions/<metrics basename>.parquet` — per-row test scores of every model in that dump.
+- `results/experiments/summary.csv` — the one tidy table for the effect-of-timing analysis.

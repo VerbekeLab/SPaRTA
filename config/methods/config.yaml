@@ -1,52 +1,264 @@
-experiment: 'features_NN' #Options are 'features_NN' and 'features_XGBoost'
+experiment: 'features_NN' # 'features_NN', 'features_XGBoost', 'features_CNN', 'timeseries', 'cnn_seq', or 'baselines'
 
-IBM:
-  features_NN:
+# ---------------------------------------------------------------------------
+# Default hyperparameters and tuning search spaces, defined once here and
+# shared across datasets via YAML anchors (&name) + merge keys (<<: *name).
+# To tune a single dataset differently, override the field inside its block,
+# e.g.:
+#     Tide:
+#       features_CNN:
+#         <<: *features_CNN
+#         n_trials: 50            # everything else inherited from the default
+# Note: the merge is shallow — overriding `search_space` replaces the whole
+# nested dict, so re-list every entry you want when you override it.
+# The `defaults` key itself is not read by any script; it only holds anchors.
+# ---------------------------------------------------------------------------
+defaults:
+  # Shallow feed-forward net on the 3x3 measures. Defaults reproduce the
+  # values previously hardcoded in scripts/experiment_features.py.
+  features_NN: &features_NN
     data_directory: 'results/features/'
     num_layers: 2
     hidden_size: 16
     output_size: 1
     n_epochs: 100
     learning_rate: 0.001
+    pos_weight_scale: 10        # pos_weight = round(neg/pos) * pos_weight_scale
 
-  features_XGBoost:
+  # XGBoost with sklearn GridSearchCV. `param_grid` mirrors the grid that was
+  # previously hardcoded; edit it to change the search.
+  features_XGBoost: &features_XGBoost
     data_directory: 'results/features/'
-    n_estimators: 100
-    max_depth: 5
-    learning_rate: 0.1
-    subsample: 0.8
-    colsample_bytree: 0.8
+    num_boost_round: 200
+    cv: 5
+    scoring: 'roc_auc'
+    param_grid:
+      objective: ['binary:logistic']
+      max_depth: [3, 4, 5, 6]   # depth of each tree
+      eta: [0.01, 0.1, 0.2]     # learning rate
+      subsample: [0.6, 0.8, 1.0]  # fraction of data per tree
+
+  # CNN over the 3x3 pictures, tuned with Optuna. `search_space` is consumed by
+  # suggest_param (see src/utils/setup.py): a list -> categorical, a
+  # {low, high, step?} dict -> suggest_int, add `type: float` (+ optional `log`)
+  # for suggest_float. `storage` persists the study to SQLite so array tasks can
+  # resume / run in parallel; the study name is derived per dataset in-script.
+  features_CNN: &features_CNN
+    data_directory: 'results/features/'
+    n_trials: 150
+    batch_size: 512
+    # Optuna study storage. A per-STUDY SQLite file (templated on {study_name} in-script)
+    # makes each study resumable after a Slurm timeout and lets parallel array tasks run
+    # without contending on one DB file (sqlite3 ships with Python, nothing to install). Set
+    # to null for an in-memory study (no files, but a killed job loses all its trials). To
+    # start a study over rather than resume it, delete its results/tuning/<study_name>.db.
+    storage: 'sqlite:///results/tuning/{study_name}.db'
+    # MedianPruner: objective() reports val AUC-PR each epoch, so trials tracking below the
+    # median of completed trials are stopped early — most of the budget goes to good configs.
+    pruner:
+      n_startup_trials: 10   # no pruning until this many trials finish (establish a baseline)
+      n_warmup_steps: 10     # never prune before this many epochs (early epochs are noisy)
+    search_space:
+      num_epochs:       {low: 10, high: 500, step: 10}
+      hidden_channels:  {low: 8, high: 64, step: 2}
+      num_layers:       {low: 2, high: 5}
+      kernel_size:      {low: 2, high: 3}
+      max_pool:         [true, false]
+      half_final_layer: [true, false]
+      scale_labels:     {low: 0, high: 100000, step: 100}
+      learning_rate:    [0.00001, 0.0001, 0.001, 0.01]
+      weight_decay:     {low: 1.0e-6, high: 1.0e-3, type: float, log: true}
+
+  # Sequence models (LSTM / Transformer) over K-snapshot windows, tuned with
+  # Optuna against the temporal val-band AUC-PR. `search_space` is consumed by
+  # suggest_param (see src/utils/setup.py): a list -> categorical, a
+  # {low, high, step?} dict -> suggest_int, add `type: float` (+ optional `log`)
+  # for suggest_float. `d_model = head_dim * nhead`, so it is always divisible
+  # by nhead. `alpha`/`gamma` apply only when `loss` is 'focal'. `storage`
+  # persists the study to SQLite (see features_CNN) so array tasks can resume.
+  timeseries: &timeseries
+    data_directory: 'results/features/'
+    # Matches baselines.nn_n_trials: LSTM/Transformer trials are mini-batch training (minutes
+    # each), not a single tree fit, and val-AUC-PR plateaus well before 150 trials on these
+    # cells — a smaller budget costs little while cutting the sweep's GPU-hours substantially.
+    n_trials: 50             # Optuna budget per sequence-model architecture (LSTM, Transformer)
+    patience: 30             # epochs with no val-AUC-PR improvement before early stop
+    # Per-study SQLite (templated on {study_name} in-script) -> resume-after-timeout + no
+    # cross-task DB contention; null = in-memory. Delete the .db to restart a study fresh.
+    storage: 'sqlite:///results/tuning/{study_name}.db'
+    pruner:                  # MedianPruner: train_model reports val AUC-PR each epoch (see below)
+      n_startup_trials: 10
+      n_warmup_steps: 10
+    search_space:
+      hidden:       {low: 16, high: 256, step: 16}
+      num_layers:   {low: 1, high: 4}
+      head_dim:     {low: 4, high: 16, step: 4}
+      nhead:        {low: 1, high: 8}          # d_model = head_dim * nhead (always divisible by nhead)
+      dropout:      {low: 0.0, high: 0.5, step: 0.1, type: float}
+      lr:           [0.0001, 0.001, 0.01]
+      weight_decay: {low: 1.0e-6, high: 1.0e-3, type: float, log: true}
+      # Same reasoning as nn_search_space.batch_size below. Now that a batch is one gather
+      # instead of one DataLoader row-fetch per sample (see train_model), per-batch cost no
+      # longer grows with batch_size, so a bigger batch genuinely cuts the step count and gives
+      # the GPU real work per launch — hence the order-of-magnitude move up from [256, 512, 1024].
+      # Changing these choices invalidates existing studies (Optuna rejects a changed
+      # CategoricalDistribution): delete results/tuning/LSTM_*.db and Transformer_*.db first.
+      batch_size:   [1024, 4096, 16384]
+      # Halved from 300: patience/pruning already end most trials well before the old ceiling,
+      # so this mainly stops the rare non-early-stopped trial from running needlessly long.
+      epochs:       {low: 50, high: 150, step: 50}
+      loss:         ['bce', 'focal']
+      alpha:        {low: 0.5, high: 0.95, step: 0.05, type: float}   # focal only
+      gamma:        [0.0, 1.0, 2.0]                                   # focal only
+
+  # SPaRTA architecture (scripts/experiment_CNN_LSTM.py): a per-frame CNN embeds each 3x3xF
+  # snapshot, then an LSTM / Transformer reads the K embeddings. Same windows, temporal split,
+  # losses and Optuna protocol as `timeseries` (it is the flat-input ablation of this), so the
+  # sequence-side and training-side entries mirror it; the cnn_*/kernel_size/emb_dim entries
+  # tune the frame encoder (FrameEncoder). `hidden` is read by the LSTM body only and
+  # `head_dim`/`nhead` by the Transformer body only (the script drops the unused ones per study).
+  cnn_seq: &cnn_seq
+    data_directory: 'results/features/'
+    n_trials: 50             # per architecture; same budget as `timeseries`
+    patience: 30
+    storage: 'sqlite:///results/tuning/{study_name}.db'
+    pruner:
+      n_startup_trials: 10
+      n_warmup_steps: 10
+    search_space:
+      cnn_channels: {low: 8, high: 64, step: 8}    # frame-encoder conv width
+      cnn_layers:   {low: 1, high: 3}              # frame-encoder conv depth
+      kernel_size:  [2, 3]
+      emb_dim:      [16, 32, 64]                   # per-frame embedding fed to the sequence model
+      hidden:       {low: 16, high: 256, step: 16}
+      num_layers:   {low: 1, high: 4}
+      head_dim:     {low: 4, high: 16, step: 4}
+      nhead:        {low: 1, high: 8}
+      dropout:      {low: 0.0, high: 0.5, step: 0.1, type: float}
+      lr:           [0.0001, 0.001, 0.01]
+      weight_decay: {low: 1.0e-6, high: 1.0e-3, type: float, log: true}
+      batch_size:   [1024, 4096, 16384]
+      epochs:       {low: 50, high: 150, step: 50}
+      loss:         ['bce', 'focal']
+      alpha:        {low: 0.5, high: 0.95, step: 0.05, type: float}   # focal only
+      gamma:        [0.0, 1.0, 2.0]                                   # focal only
+
+  # Non-sequential baselines (scripts/experiment_baseline.py) — XGBoost, a feed-forward MLP,
+  # and IsolationForest on the same K-snapshot windows the sequence models use. XGBoost and
+  # the MLP are each tuned with a small Optuna search on the val band (the MLP standardises
+  # its inputs and trains mini-batch with early stopping); IsolationForest is unsupervised,
+  # so its params are fixed (no labels to tune against). Decoupled from `timeseries` so each
+  # can evolve independently and so additional non-baseline, non-sequential methods can slot
+  # in. `nn_search_space` is consumed by suggest_param like the other search spaces
+  # (list -> categorical, {low, high, step?} -> suggest_int).
+  baselines: &baselines
+    data_directory: 'results/features/'
+    n_trials: 150            # XGBoost's Optuna budget (IsolationForest is not searched)
+    nn_n_trials: 50          # MLP's own budget — a single trial is mini-batch training (minutes),
+                             # not one tree fit (seconds), so it can't absorb the same 150 as XGBoost;
+                             # its GPU job (train_baseline_nn.slurm) is scoped for this many.
+    patience: 20             # epochs with no val-AUC-PR improvement before early stop (MLP only)
+    # Per-study SQLite (templated on {study_name} in-script): the XGBoost and MLP studies get
+    # separate DB files, so the per-model Slurm fan-out (train_baseline.slurm <ds> xgboost|nn)
+    # never contends, and each resumes after a timeout. null = in-memory. Delete .db to restart.
+    storage: 'sqlite:///results/tuning/{study_name}.db'
+    pruner:                  # MedianPruner applies to the MLP (epoch-wise val AUC-PR reports).
+      n_startup_trials: 10   # XGBoost instead uses native early stopping (xgb_early_stopping_rounds).
+      n_warmup_steps: 10
+    xgb_early_stopping_rounds: 30   # stop adding trees when val AUC-PR stalls; n_estimators is the cap
+    xgb_search_space:
+      max_depth:        {low: 3, high: 10}
+      eta:              {low: 0.005, high: 0.3, type: float, log: true}
+      subsample:        {low: 0.6, high: 1.0, step: 0.2, type: float}
+      colsample_bytree: {low: 0.6, high: 1.0, step: 0.2, type: float}
+      min_child_weight: {low: 1, high: 10}
+      gamma:            {low: 0.0, high: 5.0, step: 0.5, type: float}
+      reg_lambda:       {low: 1.0e-3, high: 10.0, type: float, log: true}
+      reg_alpha:        {low: 1.0e-3, high: 10.0, type: float, log: true}
+      n_estimators:     {low: 200, high: 800, step: 100}   # upper bound; early stopping trims it
+    nn_search_space:
+      hidden_size:  {low: 16, high: 128, step: 16}
+      num_layers:   {low: 2, high: 5}
+      dropout:      {low: 0.0, high: 0.5, step: 0.1, type: float}
+      lr:           [0.0001, 0.001, 0.01]
+      weight_decay: {low: 1.0e-6, high: 1.0e-3, type: float, log: true}
+      # Training sets here run to the millions of rows (per-anchor node counts x train
+      # anchors), so the number of optimiser steps per epoch is what sets wall time. Raising
+      # this grid was previously useless: DataLoader(TensorDataset(...)) cost a few kernel
+      # launches PER SAMPLE, so a 4x bigger batch bought 4x the per-batch overhead and the GPU
+      # stayed at 3-4%. run_nn_baseline now slices a per-epoch permutation (one gather per
+      # batch), so the step count really does drop with batch_size. Changing these choices
+      # invalidates existing studies (Optuna rejects a changed CategoricalDistribution):
+      # delete results/tuning/baseline_nn_*.db before resubmitting.
+      batch_size:   [1024, 4096, 16384]
+      # Halved from 300 (same reasoning as timeseries.search_space.epochs): early stopping
+      # usually ends trials well before the old ceiling, which mostly capped worst-case length.
+      epochs:       {low: 50, high: 150, step: 50}   # max_epochs cap
+    iforest:
+      n_estimators: 200
+      max_samples: 'auto'
+
+  # GraphSAGE (scripts/experiment_GNN.py) on the same rows and temporal split as the baselines,
+  # with log(1 + degree) as the only node feature. FIXED hyperparameters — GARG-AML's GraphSAGE
+  # set-up (its Table 9) — no Optuna search. One model per `layers` entry: the depth is the
+  # receptive field in hops, so [1, 2] shows the gain of the second hop and stops at the
+  # second-order neighbourhood SPaRTA itself uses.
+  gnn: &gnn
+    layers: [1, 2]
+    hidden: 64
+    dropout: 0.2
+    lr: 0.001
+    weight_decay: 0.0
+    num_neighbors: [25, 10]  # training fan-out per hop; a 1-layer model uses the first entry
+    batch_size: 1024         # seed nodes per mini-batch
+    epochs: 50               # max epochs
+    patience: 5              # epochs without val-AUC-PR improvement; best epoch restored
+    num_workers: 0           # NeighborLoader sampling workers (0 = in the main process)
+
+AMLWorld:
+  features_NN:
+    <<: *features_NN
+  features_XGBoost:
+    <<: *features_XGBoost
+  features_CNN:
+    <<: *features_CNN
+  timeseries:
+    <<: *timeseries
+  cnn_seq:
+    <<: *cnn_seq
+  baselines:
+    <<: *baselines
+  gnn:
+    <<: *gnn
 
 AMLSim:
   features_NN:
-    data_directory: 'results/features/'
-    num_layers: 2
-    hidden_size: 16
-    output_size: 1
-    n_epochs: 100
-    learning_rate: 0.001
-
+    <<: *features_NN
   features_XGBoost:
-    data_directory: 'results/features/'
-    n_estimators: 100
-    max_depth: 5
-    learning_rate: 0.1
-    subsample: 0.8
-    colsample_bytree: 0.8
+    <<: *features_XGBoost
+  features_CNN:
+    <<: *features_CNN
+  timeseries:
+    <<: *timeseries
+  cnn_seq:
+    <<: *cnn_seq
+  baselines:
+    <<: *baselines
+  gnn:
+    <<: *gnn
 
 Tide:
   features_NN:
-    data_directory: 'results/features/'
-    num_layers: 2
-    hidden_size: 16
-    output_size: 1
-    n_epochs: 100
-    learning_rate: 0.001
-
+    <<: *features_NN
   features_XGBoost:
-    data_directory: 'results/features/'
-    n_estimators: 100
-    max_depth: 5
-    learning_rate: 0.1
-    subsample: 0.8
-    colsample_bytree: 0.8
+    <<: *features_XGBoost
+  features_CNN:
+    <<: *features_CNN
+  timeseries:
+    <<: *timeseries
+  cnn_seq:
+    <<: *cnn_seq
+  baselines:
+    <<: *baselines
+  gnn:
+    <<: *gnn

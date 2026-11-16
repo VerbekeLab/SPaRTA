@@ -1,4 +1,6 @@
 # LOAD MODULES
+import os
+import time
 from typing import Any, Dict
 
 # Third party
@@ -17,5 +19,296 @@ def load_config(file_path: str) -> Dict[str, Any]:
     """
     with open(file_path) as file:
         config = yaml.safe_load(file)
-    
+
     return config
+
+
+def resolve_dataset(data_config: Dict[str, Any]) -> str:
+    """
+    Active dataset, with the env var ``SPARTA_DATASET`` overriding the YAML.
+
+    Lets a single Slurm array task pick its dataset without editing
+    config/data/config.yaml. Falls back to ``parameters.dataset`` when unset.
+    """
+    return os.environ.get("SPARTA_DATASET", data_config['parameters']['dataset'])
+
+
+def resolve_experiment(method_config: Dict[str, Any]) -> str:
+    """
+    Active experiment, with the env var ``SPARTA_EXPERIMENT`` overriding the YAML.
+
+    Falls back to the top-level ``experiment`` key when unset.
+    """
+    return os.environ.get("SPARTA_EXPERIMENT", method_config['experiment'])
+
+
+def _as_bool(value: Any) -> bool:
+    """Truthy parse for YAML bools and env strings ('1'/'true'/'yes'/'on')."""
+    if isinstance(value, bool):
+        return value
+    return str(value).strip().lower() in ("1", "true", "yes", "y", "on")
+
+
+def _env_override(key: str, default: Any, cast):
+    """``SPARTA_<KEY>`` env var (if set) overrides ``default``, parsed by ``cast``.
+
+    The same idiom as :func:`resolve_dataset` / :func:`resolve_experiment`, lifted so a
+    single Slurm array task can pick a timing / sequence combo without editing the YAML.
+    The default (already the right type from PyYAML) is returned untouched when unset.
+    """
+    raw = os.environ.get(f"SPARTA_{key.upper()}")
+    return cast(raw) if raw is not None else default
+
+
+def resolve_rescore() -> bool:
+    """``SPARTA_RESCORE=1``: re-score finished cells instead of training them.
+
+    The experiment scripts then skip Optuna and the final fit: sequence/CNN models are
+    reloaded from ``results/models/<study>.pt``, tabular baselines are refit once from the
+    stored ``results/tuning/*_best_params.json``. Only ``results/predictions/<stem>.parquet``
+    is written (metrics ``.txt`` and best-params JSON are left untouched), and the reproduced
+    AUC-PR / AUC-ROC are printed next to the ones already on disk as a sanity check.
+    """
+    return _env_override("rescore", False, _as_bool)
+
+
+def resolve_dynamic(data_config: Dict[str, Any]) -> bool:
+    """``parameters.time_dynamic`` with ``SPARTA_TIME_DYNAMIC`` overriding the YAML.
+
+    Lets one extraction script run both the static (``false``) and dynamic (``true``)
+    passes from the same config.
+    """
+    return _env_override("time_dynamic", data_config['parameters']['time_dynamic'], _as_bool)
+
+
+def resolve_timing(data_config: Dict[str, Any], network: str) -> Dict[str, Any]:
+    """``network_construction`` timing dict, with ``SPARTA_*`` env overrides applied.
+
+    Overridable: ``SPARTA_TIME_STEP``, ``SPARTA_TIME_WIDTH``, ``SPARTA_TIME_TYPE``,
+    ``SPARTA_ECHO``, ``SPARTA_DAYS_ECHO``. Returns a shallow copy (never mutates the loaded
+    config) with the same keys as ``data_config[network]['network_construction']``.
+    """
+    nc = dict(data_config[network]['network_construction'])
+    nc['time_step'] = _env_override('time_step', nc['time_step'], int)
+    nc['time_width'] = _env_override('time_width', nc['time_width'], int)
+    nc['time_type'] = _env_override('time_type', nc['time_type'], str)
+    nc['echo'] = _env_override('echo', nc['echo'], _as_bool)
+    nc['days_echo'] = _env_override('days_echo', nc['days_echo'], int)
+    return nc
+
+
+def resolve_sequence(data_config: Dict[str, Any], network: str) -> Dict[str, Any]:
+    """``sequence`` dict, with ``SPARTA_*`` env overrides applied.
+
+    Overridable: ``SPARTA_K``, ``SPARTA_TASK``, ``SPARTA_N_TEST_ANCHORS``,
+    ``SPARTA_N_VAL_ANCHORS``. K and task are the *free* sweep axis (no re-extraction),
+    so the env override lets one array task pick them without touching the YAML.
+    """
+    sq = dict(data_config[network]['sequence'])
+    sq['K'] = _env_override('k', sq['K'], int)
+    sq['task'] = _env_override('task', sq['task'], str)
+    sq['n_test_anchors'] = _env_override('n_test_anchors', sq['n_test_anchors'], int)
+    sq['n_val_anchors'] = _env_override('n_val_anchors', sq['n_val_anchors'], int)
+    return sq
+
+
+def run_tag(timing: Dict[str, Any]) -> str:
+    """Deterministic, filesystem-safe id for a timing combo — used to namespace the
+    dynamic feature dir, the ``.npz`` cache, and the per-combo result/model files so a
+    sweep's combos coexist instead of overwriting each other.
+
+    ``echo`` ignores the window width in ``load_network_time`` (network_data_loader.py),
+    so the tag branches on echo: echo on -> ``echo{days_echo}``, echo off ->
+    ``w{time_width}``, both prefixed by the snapshot grid ``{time_type[0]}{time_step}``
+    (e.g. ``d1``) so combos that share a grid — hence the same T and comparable
+    K-windows — share a prefix: ``d1_echo3``, ``d1_echo7``, ``d1_w1``, ``d1_w3``.
+    """
+    grid = f"{str(timing['time_type'])[0]}{int(timing['time_step'])}"
+    if _as_bool(timing['echo']):
+        return f"{grid}_echo{int(timing['days_echo'])}"
+    return f"{grid}_w{int(timing['time_width'])}"
+
+
+def resolve_ts_cache_dir(tag: str) -> str | None:
+    """Per-combo directory for the windowed-dataset ``.npz`` cache, or ``None`` to
+    disable caching (nothing is written; every job rebuilds from the feature files).
+
+    Resolution order:
+      1. ``SPARTA_TS_CACHE=off`` (also ``0``/``none``/``false``) -> ``None``;
+      2. ``SPARTA_TS_CACHE=<dir>`` -> ``<dir>/<tag>``;
+      3. ``$VSC_SCRATCH`` set (VSC clusters) -> ``$VSC_SCRATCH/SPaRTA/timeseries/<tag>``
+         — the cache is transient shared state between the per-model Slurm jobs of a
+         combo, so it belongs on the large scratch filesystem, not the quota'd
+         data/home volume the repo lives on;
+      4. otherwise the historical ``results/timeseries/<tag>``.
+    """
+    raw = os.environ.get("SPARTA_TS_CACHE", "").strip()
+    if raw.lower() in ("off", "0", "none", "false"):
+        return None
+    if raw:
+        return os.path.join(raw, tag)
+    scratch = os.environ.get("VSC_SCRATCH", "").strip()
+    if scratch:
+        return os.path.join(scratch, "SPaRTA", "timeseries", tag)
+    return os.path.join("results/timeseries", tag)
+
+
+def resolve_window_store_dir(tag: str) -> str | None:
+    """Per-TAG directory for the prebuilt window store (src/data/window_store.py), or ``None``
+    to disable it (every job then re-assembles windows from the feature files, the old path).
+
+    Resolution mirrors :func:`resolve_ts_cache_dir`:
+      1. ``SPARTA_WINDOW_STORE=off`` (also ``0``/``none``/``false``) -> ``None``;
+      2. ``SPARTA_WINDOW_STORE=<dir>`` -> ``<dir>/<tag>``;
+      3. ``$VSC_SCRATCH`` set -> ``$VSC_SCRATCH/SPaRTA/windows/<tag>``;
+      4. otherwise ``results/windows/<tag>``.
+
+    The store is keyed on the tag ALONE (not K/task), because the stacked snapshot block it
+    holds is the same for every (K, task) of a tag — that is the whole point of it.
+    """
+    raw = os.environ.get("SPARTA_WINDOW_STORE", "").strip()
+    if raw.lower() in ("off", "0", "none", "false"):
+        return None
+    if raw:
+        return os.path.join(raw, tag)
+    scratch = os.environ.get("VSC_SCRATCH", "").strip()
+    if scratch:
+        return os.path.join(scratch, "SPaRTA", "windows", tag)
+    return os.path.join("results/windows", tag)
+
+
+def require_prebuilt_windows() -> bool:
+    """True when a job must NOT fall back to re-assembling windows from the feature files.
+
+    Set ``SPARTA_REQUIRE_WINDOWS=1`` in GPU jobs: the fallback is ~40 min of single-threaded
+    pandas work with the GPU allocated and idle, so a missing store should fail the job in
+    seconds (rerun scripts/build_window_store.py) rather than quietly pay for it.
+    """
+    return os.environ.get("SPARTA_REQUIRE_WINDOWS", "").strip().lower() in ("1", "true", "yes", "on")
+
+
+def suggest_param(trial, name: str, spec: Any):
+    """
+    Map a YAML search-space entry to an Optuna ``trial.suggest_*`` call.
+
+    Spec forms (kept deliberately small so the config stays readable):
+
+    - ``list``  -> ``suggest_categorical`` (e.g. ``[1e-5, 1e-4, 1e-3]``)
+    - ``{low, high, step?}``              -> ``suggest_int`` (default)
+    - ``{low, high, step?, log?, type: float}`` -> ``suggest_float``
+    - any scalar -> returned as-is (a fixed, untuned value)
+
+    ``trial`` is an Optuna ``Trial``; this helper never imports optuna itself.
+    """
+    if isinstance(spec, list):
+        return trial.suggest_categorical(name, spec)
+    if isinstance(spec, dict):
+        low, high = spec['low'], spec['high']
+        if spec.get('type') == 'float':
+            return trial.suggest_float(name, low, high,
+                                       step=spec.get('step'), log=spec.get('log', False))
+        return trial.suggest_int(name, low, high, step=spec.get('step', 1))
+    return spec
+
+
+# --- Optuna study helpers (shared by experiment_baseline / _LSTM / _CNN) -----------------
+# optuna is imported lazily inside each helper so importing this module stays cheap and does
+# not perturb the xgboost-before-torch import order the experiment scripts rely on.
+
+def resolve_storage(cfg, **fields):
+    """Optuna storage URL from ``cfg['storage']`` with ``{field}`` placeholders filled, or
+    ``None`` when the key is unset/empty (an in-memory study, the old default).
+
+    Pass ``study_name=...`` and template the URL on it so EACH study gets its OWN SQLite
+    file: concurrent Slurm array tasks (and the per-model baseline fan-out) then never contend
+    on one file, and every study resumes independently after a wall-time kill. Example config:
+    ``storage: 'sqlite:///results/tuning/{study_name}.db'``.
+    """
+    storage = cfg.get('storage')
+    return storage.format(**fields) if storage else None
+
+
+def make_pruner(cfg):
+    """Build an Optuna pruner from ``cfg['pruner']`` (a dict of ``MedianPruner`` kwargs, e.g.
+    ``{n_startup_trials: 10, n_warmup_steps: 10}``), or a ``NopPruner`` when the key is absent
+    or falsy. Only trials that call ``trial.report()`` each epoch can be pruned, so studies
+    without intermediate reports (e.g. the single-fit XGBoost baseline) are unaffected either
+    way; the explicit NopPruner just makes "no pruning" the visible, intended default there.
+    """
+    import optuna
+    spec = cfg.get('pruner')
+    if not spec:
+        return optuna.pruners.NopPruner()
+    return optuna.pruners.MedianPruner(**spec)
+
+
+def walltime_budget(reserve_s=0.0):
+    """Seconds this job may still spend tuning before Slurm's wall-time kill, minus a
+    safety margin — or ``None`` outside Slurm / on pre-23.02 Slurm (no ``SLURM_JOB_END_TIME``
+    env var), where behaviour is unchanged. Pass as ``study.optimize(..., timeout=...)`` so
+    a study that can't finish its trial budget stops CLEANLY: the in-flight trial isn't lost
+    to the kill, and the script still reaches its final refit / metrics dump (which a
+    resubmit then improves on, since the study resumes from storage).
+
+    The margin (``SPARTA_WALL_MARGIN_S``, default 3600) must cover everything that runs
+    AFTER the timeout fires: Optuna never interrupts an in-flight trial — it only stops
+    STARTING new ones — so budget one worst-case trial plus the post-tuning refit/eval.
+    ``reserve_s`` is extra time held back on top of the margin for a refit the caller knows
+    it will need (see ``tune_arch``'s best-trial cache): when the study's best trial has no
+    saved weights, the refit costs about that trial's own duration, which can exceed the
+    whole margin on the long sequence cells.
+    Call at each ``optimize()`` (not once up front): back-to-back studies in one job then
+    each see the wall clock actually left.
+    """
+    try:
+        end = int(os.environ.get("SLURM_JOB_END_TIME", "0"))
+    except ValueError:
+        return None
+    if end <= 0:
+        return None
+    margin = int(os.environ.get("SPARTA_WALL_MARGIN_S", "3600"))
+    # Floor of 60s: optuna checks elapsed-vs-timeout between trials, so even a tiny
+    # budget runs at least one trial — same outcome as today's hard kill, never worse.
+    return max(60.0, end - time.time() - margin - reserve_s)
+
+
+def remaining_trials(study, n_trials):
+    """Trials still to run for a budget of ``n_trials``, subtracting the finished
+    (COMPLETE / PRUNED / FAIL) trials already in ``study``.
+
+    So a study reopened from persistent ``storage`` after a Slurm timeout TOPS UP to
+    ``n_trials`` instead of running a fresh ``n_trials`` on top of what it already did. FAIL is
+    counted (not retried) so a deterministically failing trial can't loop forever; a stale
+    RUNNING trial from a killed worker is not counted, so its budget slot is refilled.
+    """
+    import optuna
+    finished = (optuna.trial.TrialState.COMPLETE,
+                optuna.trial.TrialState.PRUNED,
+                optuna.trial.TrialState.FAIL)
+    done = sum(1 for t in study.trials if t.state in finished)
+    return max(0, n_trials - done)
+
+
+def optimize_study(study, objective, n_trials, label=None, reserve_s=0.0):
+    """Run ``study`` up to a TOTAL of ``n_trials`` finished trials, logging what storage
+    already held. ``reserve_s`` is forwarded to ``walltime_budget``.
+
+    Wraps the ``study.optimize(objective, n_trials=remaining_trials(...),
+    timeout=walltime_budget())`` call the experiment scripts share, so the per-study SQLite's
+    two jobs are both visible in the job log: topping up a study a walltime kill stopped
+    short, and short-circuiting an accidental duplicate submission. A study already at its
+    budget runs NO trials — the job goes straight to the final refit / metrics dump using the
+    stored best params, which is why the SQLite files are KEPT after a completed run (nothing
+    deletes them; a .db in results/tuning/ with n_trials finished trials IS the record that
+    that cell's tuning is done — see slurm/missing_runs.sh, which audits exactly that).
+    """
+    todo = remaining_trials(study, n_trials)
+    name = label or study.study_name
+    if todo == 0:
+        print(f"[optuna] {name}: {n_trials}/{n_trials} trials already in storage"
+              f" -- skipping tuning, reusing the stored best params", flush=True)
+        return study
+    print(f"[optuna] {name}: {n_trials - todo}/{n_trials} trials already in storage"
+          f" -- running {todo} more", flush=True)
+    study.optimize(objective, n_trials=todo, timeout=walltime_budget(reserve_s))
+    return study

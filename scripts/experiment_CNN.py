@@ -1,126 +1,169 @@
+# CNN over the static 3x3 measure "pictures" -- one snapshot per node, no time windows
+# (see experiment_LSTM.py for the K-snapshot sequence models). Optuna study maximises
+# val-band AUC-PR; the best config is retrained on train (best-epoch weights restored)
+# and scored on the held-out test band.
 import os
 import sys
 DIR = "./"
 os.chdir(DIR)
 sys.path.append(DIR)
 
-import torch 
-import torchvision
+import numpy as np
+import pandas as pd
+import torch
 import torch.nn as nn
 import torchvision.transforms as transforms
 from torch.utils.data import DataLoader
-import pandas as pd
 from sklearn.model_selection import train_test_split
+
+import json
+import optuna
+from sklearn.metrics import average_precision_score
 
 from src.data.feature_data import ImageDataset
 from src.methods.models import CNN
-from src.utils.setup import load_config
+from src.methods import evaluation
+from src.utils.setup import (load_config, resolve_dataset, suggest_param,
+                             resolve_storage, make_pruner, optimize_study, resolve_rescore)
+from src.utils.feature_io import load_table
 
-from sklearn.metrics import roc_auc_score, average_precision_score
+SEED = 1997
 
-import optuna
 
-def load_data(features_path, labels_path):
-    features_df = pd.read_csv(features_path)
-    labels_df = pd.read_csv(labels_path)
+def load_data(features_stem, labels_stem):
+    # Stems without extension: load_table prefers .parquet, falls back to legacy .csv.
+    features_df = load_table(features_stem)
+    labels_df = load_table(labels_stem)
     data = pd.merge(features_df, labels_df, left_on='node', right_on='Account')
-    data.drop(columns=['node', 'Account'], inplace=True)
+    data.drop(columns=['Account'], inplace=True)   # 'node' kept: ids of the test rows are saved
     return data
 
-def transforms_channels(X, n_channels):
+
+def fit_channel_transform(X, n_channels):
+    """Per-channel mean/std Normalize, fit on X (train only)."""
     X_tensor = torch.tensor(X, dtype=torch.float32).view(-1, n_channels, 3, 3)
-    X_mean = torch.mean(X_tensor, dim = [0,2,3])
-    X_std = torch.std(X_tensor, dim = [0,2,3])
-    return transforms.Normalize(X_mean, X_std)
+    return transforms.Normalize(X_tensor.mean([0, 2, 3]), X_tensor.std([0, 2, 3]))
 
-def objective(trial):
-    ### To Do ###
-    # Define hyperparameter search space
-    num_channels = 10
-    num_epochs = trial.suggest_int('num_epochs', 10, 500, step=10)
-    hidden_channels = trial.suggest_int('hidden_channels', 8, 64, step=2)
-    num_layers = trial.suggest_int('num_layers', 2, 5)
-    kernel_size = trial.suggest_int('kernel_size', 2, 3)
-    max_pool = trial.suggest_categorical('max_pool', [True, False])
-    half_final_layer = trial.suggest_categorical('half_final_layer', [True, False])
-    scale_labels = trial.suggest_int('scale_labels', 0, 100000, step=100)
-    #learning_rate = trial.suggest_float('learning_rate', 1e-5, 1e-2, log=True)
-    learning_rate = trial.suggest_categorical('learning_rate', [1e-5, 1e-4, 1e-3, 1e-2])
 
-    model = CNN(
+def predict(model, loader, device):
+    """P(positive) over a loader, as a numpy array."""
+    model.eval()
+    probs = []
+    with torch.no_grad():
+        for images, _ in loader:
+            probs.extend(torch.sigmoid(model(images.to(device))).cpu().numpy().tolist())
+    return np.array(probs)
+
+
+def build_cnn(params, num_channels):
+    return CNN(
         num_channels=num_channels,
-        hidden_channels=hidden_channels,
-        num_layers=num_layers,
-        kernel_size=kernel_size,
-        max_pool=max_pool,
-        half_final_layer=half_final_layer
+        hidden_channels=params['hidden_channels'],
+        num_layers=params['num_layers'],
+        kernel_size=params['kernel_size'],
+        max_pool=params['max_pool'],
+        half_final_layer=params['half_final_layer'],
     )
-    model.to(device)
-    
-    y_train = dataset_train.y.numpy()
-    if scale_labels > 0:
-        train_weight = round((y_train == 0).sum() / (y_train == 1).sum())*scale_labels/100; print(f"Positive class weight: {train_weight}")
-        pos_weight=torch.tensor(train_weight)
+
+
+def train_cnn(params, num_channels, loader_train, loader_val, y_train, y_val, device, trial=None):
+    """Train a CNN, tracking the best val-AUC-PR epoch and restoring those weights before
+    returning. num_epochs is itself tuned (no separate early-stop cap). Drives both the
+    Optuna objective (trial given) and the final fit (trial=None). Returns (model, best_val_aucpr)."""
+    model = build_cnn(params, num_channels).to(device)
+
+    if params['scale_labels'] > 0:
+        train_weight = round((y_train == 0).sum() / (y_train == 1).sum()) * params['scale_labels'] / 100
+        pos_weight = torch.tensor(train_weight, device=device)
     else:
-        pos_weight = None; print("No positive class weight applied")
+        pos_weight = None
 
     criterion = nn.BCEWithLogitsLoss(pos_weight=pos_weight)
-    optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate, weight_decay=1e-5)
+    optimizer = torch.optim.Adam(model.parameters(), lr=params['learning_rate'],
+                                 weight_decay=params.get('weight_decay', 1e-5))
 
-    for epoch in range(num_epochs):
+    best_ap, best_state = -1.0, None
+    for epoch in range(params['num_epochs']):
         model.train()
         for images, labels in loader_train:
-            images = images.to(device)
-            labels = labels.to(device)
+            images, labels = images.to(device), labels.to(device)
             optimizer.zero_grad()
-            outputs = model(images)
-            loss = criterion(outputs, labels.float())
+            loss = criterion(model(images), labels.float())
             loss.backward()
             optimizer.step()
 
-    model.eval()
-    y_pred = []
-    y_true = []
-    with torch.no_grad():
-        for images, labels in loader_val:
-            images = images.to(device)
-            labels = labels.to(device)
-            outputs = model(images)
-            y_pred.extend(torch.sigmoid(outputs).cpu().numpy().tolist())
-            y_true.extend(labels.float().cpu().numpy().tolist())
-    roc_loss = roc_auc_score(y_true, y_pred)
-    ap_loss = average_precision_score(y_true, y_pred)
-    print(f'Validation errors, AUC-ROC: {roc_loss:.4f}, AUC-PR: {ap_loss:.4f}')
-    return average_precision_score(y_true, y_pred)
+        probs = predict(model, loader_val, device)
+        ap = average_precision_score(y_val, probs) if y_val.sum() else 0.0
+        if ap > best_ap:
+            best_ap, best_state = ap, {k: v.detach().clone() for k, v in model.state_dict().items()}
+
+        # Report best-so-far (monotone) so a trial tracking below the running median of
+        # completed trials gets pruned.
+        if trial is not None:
+            trial.report(best_ap, epoch)
+            if trial.should_prune():
+                raise optuna.TrialPruned()
+
+    if best_state is not None:
+        model.load_state_dict(best_state)
+    return model, best_ap
+
+
+def _tune_cnn(study_name, storage, n_trials, search_space, num_channels,
+             loader_train, loader_val, y_train, y_val, device, pruner):
+    """One Optuna study maximising val-band AUC-PR via train_cnn. Returns (best_params, best_value)."""
+    def objective(trial):
+        params = {name: suggest_param(trial, name, spec) for name, spec in search_space.items()}
+        _, best_ap = train_cnn(params, num_channels, loader_train, loader_val, y_train, y_val, device, trial=trial)
+        return best_ap
+
+    study = optuna.create_study(
+        direction='maximize',
+        sampler=optuna.samplers.TPESampler(seed=SEED),
+        pruner=pruner,
+        study_name=study_name,
+        storage=storage,
+        load_if_exists=True,
+    )
+    # Runs only the trials still missing from the budget, stopping before Slurm's wall-time
+    # kill (walltime_budget leaves SPARTA_WALL_MARGIN_S for the in-flight trial + final refit)
+    # so best-params/metrics still get written; the resumed study tops back up to n_trials on
+    # resubmit, and one already at n_trials skips tuning entirely.
+    optimize_study(study, objective, n_trials, label=study_name)
+    return study.best_params, study.best_value
 
 
 if __name__ == "__main__":
-    ### To Do ###
-    # Transform input image data
-
-    device = torch.device("cuda" if torch.cuda.is_available() else "mps" if torch.backends.mps.is_available() else "cpu"); print(f"Training on: {device}")
-
-    batch_size = 512
+    device = torch.device("cuda" if torch.cuda.is_available()
+                          else "mps" if torch.backends.mps.is_available() else "cpu")
+    print(f"Training on: {device}")
+    torch.manual_seed(SEED)
+    np.random.seed(SEED)
 
     data_config = load_config("config/data/config.yaml")
     method_config = load_config("config/methods/config.yaml")
 
-    dataset = data_config['parameters']['dataset']
+    dataset = resolve_dataset(data_config)
     type_dataset = data_config[dataset]['type_dataset']
-
     num_channels = data_config[dataset]['n_channels']
 
-    data = load_data(f"results/features/{type_dataset}_static_features_t.csv",
-                   f"results/features/{type_dataset}_static_labels_t.csv")
-    
-    X = data.drop(columns=['is_laundering'])
+    cnn_cfg = method_config[dataset]['features_CNN']
+    batch_size = cnn_cfg['batch_size']
+    search_space = cnn_cfg['search_space']
+    data_directory = cnn_cfg['data_directory']
+
+    data = load_data(os.path.join(data_directory, f"{type_dataset}_static_features"),
+                     os.path.join(data_directory, f"{type_dataset}_static_labels"))
+    X = data.drop(columns=['is_laundering', 'node'])
     y = data['is_laundering']
 
-    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, stratify=y, random_state=1997)
-    X_train, X_val, y_train, y_val = train_test_split(X_train, y_train, test_size=0.25, stratify=y_train, random_state=1997)
+    # No time axis on the static network (one snapshot per node), so a stratified random
+    # split stands in for the sequence models' temporal split.
+    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, stratify=y, random_state=SEED)
+    X_train, X_val, y_train, y_val = train_test_split(X_train, y_train, test_size=0.25, stratify=y_train, random_state=SEED)
+    y_train_np, y_val_np, y_test_np = y_train.to_numpy(), y_val.to_numpy(), y_test.to_numpy()
 
-    transform = transforms_channels(X_train.values, n_channels=num_channels)
-
+    transform = fit_channel_transform(X_train.values, num_channels)
     dataset_train = ImageDataset(X_train.values, y_train, n_channels=num_channels, transform=transform)
     dataset_val = ImageDataset(X_val.values, y_val, n_channels=num_channels, transform=transform)
     dataset_test = ImageDataset(X_test.values, y_test, n_channels=num_channels, transform=transform)
@@ -129,11 +172,65 @@ if __name__ == "__main__":
     loader_val = DataLoader(dataset_val, batch_size=batch_size, shuffle=False)
     loader_test = DataLoader(dataset_test, batch_size=batch_size, shuffle=False)
 
-    study = optuna.create_study(direction='maximize')
-    study.optimize(objective, n_trials=100)
-    cnn_params = study.best_params
-    cnn_values = study.best_value
-    with open("results/tuning/CNN_params.txt", "w") as f:
-        f.write(str(cnn_params))
-        f.write("\n")
-        f.write("AUC-PRC: "+str(cnn_values))
+    print(f"CNN | train {len(dataset_train)} val {len(dataset_val)} test {len(dataset_test)} | channels={num_channels}")
+
+    os.makedirs("results/tuning", exist_ok=True)
+    os.makedirs("results/models", exist_ok=True)
+    os.makedirs("results/experiments", exist_ok=True)
+
+    # Per-study SQLite (resolve_storage templates the URL on study_name) so the study
+    # resumes after a Slurm timeout; optimize_study tops it up to n_trials on resume.
+    study_name = f"CNN_{type_dataset}"
+    node_test = data.loc[X_test.index, 'node'].to_numpy()
+    pred_path = f"{evaluation.PRED_DIR}/{type_dataset}_CNN.parquet"
+
+    # SPARTA_RESCORE=1: reload the saved checkpoint, write only results/predictions/ (no Optuna, no
+    # training, metrics .txt / plot untouched). The channel transform is refit from the (seeded,
+    # deterministic) train split and checked against the checkpoint's.
+    if resolve_rescore():
+        ckpt_path = f"results/models/{study_name}.pt"
+        if not os.path.exists(ckpt_path):
+            raise SystemExit(f"[rescore] no checkpoint at {ckpt_path}")
+        ckpt = torch.load(ckpt_path, map_location=device, weights_only=False)
+        if not (torch.allclose(torch.as_tensor(ckpt['mean']).cpu(), torch.as_tensor(transform.mean).cpu())
+                and torch.allclose(torch.as_tensor(ckpt['std']).cpu(), torch.as_tensor(transform.std).cpu())):
+            print('[rescore] CNN: WARNING channel transform differs from the checkpoint\'s')
+        model = build_cnn(ckpt['best_params'], num_channels).to(device)
+        model.load_state_dict(ckpt['state_dict'])
+        scores = {"CNN": predict(model, loader_test, device)}
+        evaluation.compare_to_metrics(f"results/experiments/{type_dataset}_CNN.txt", scores, y_test_np)
+        evaluation.save_predictions(pred_path, scores, y_test_np, nodes=node_test)
+        print(f"Wrote predictions -> {pred_path}")
+        sys.exit(0)
+
+    best_params, best_value = _tune_cnn(
+        study_name, resolve_storage(cnn_cfg, study_name=study_name), cnn_cfg['n_trials'],
+        search_space, num_channels, loader_train, loader_val, y_train_np, y_val_np, device,
+        make_pruner(cnn_cfg))
+
+    # Final fit on train (same train_cnn as the objective, best-epoch restored), scored on test.
+    torch.manual_seed(SEED)
+    model, _ = train_cnn(best_params, num_channels, loader_train, loader_val, y_train_np, y_val_np, device)
+    probs_test = predict(model, loader_test, device)
+
+    with open(f"results/tuning/{study_name}_best_params.json", "w") as f:
+        json.dump({"dataset": type_dataset, "best_params": best_params,
+                   "best_value_AUCPR": best_value}, f, indent=2)
+
+    torch.save({"state_dict": model.state_dict(), "mean": transform.mean, "std": transform.std,
+               "num_channels": num_channels, "best_params": best_params},
+              f"results/models/{study_name}.pt")
+
+    scores = {"CNN": probs_test}
+    metrics_path = f"results/experiments/{type_dataset}_CNN.txt"
+    evaluation.write_metrics(metrics_path, scores, y_test_np)
+    evaluation.save_predictions(pred_path, scores, y_test_np, nodes=node_test)
+    evaluation.plot_curves(
+        scores, y_test_np,
+        f"CNN — {type_dataset} (n={len(y_test_np)}, {int(y_test_np.sum())} positive)",
+        save_path=f"results/experiments/{type_dataset}_CNN.png")
+    print(f"Wrote metrics -> {metrics_path}")
+
+    # The per-study SQLite in results/tuning/ is deliberately KEPT — see optimize_study. It is
+    # the on-disk record that this study finished its n_trials budget, and it makes an
+    # accidental resubmission cheap (it skips tuning) instead of a full re-tune.

@@ -13,3 +13,7 @@ pip install optuna
 pip install igraph
 pip install easygui
 pip install pycairo
+# GraphSAGE baseline (scripts/experiment_GNN.py): PyG + its neighbour sampler. pyg-lib must match
+# the installed torch + CUDA build, e.g. torch 2.9 on CPU / Apple Silicon:
+pip install torch_geometric
+pip install pyg-lib -f https://data.pyg.org/whl/torch-2.9.0+cpu.html   # VSC A100: +cu126 (or your torch's CUDA tag)
