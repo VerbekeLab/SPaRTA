@@ -144,7 +144,8 @@ time-windowed (snapshot) construction with optional exponential time-decay ("ech
     a `.db` with `n_trials` finished trials is the on-disk record that that cell is done
     (what [slurm/missing_runs.sh](slurm/missing_runs.sh) audits). Delete one by hand only to
     force a fresh search — required after changing a `search_space` categorical.
-    The CNN-LSTM / CNN-Transformer studies also keep `<study_name>_best_trial.pt` beside the
+    The sequence-model studies (LSTM, Transformer, CNN-LSTM, CNN-Transformer) also keep
+    `<study_name>_best_trial.pt` beside the
     `.db`: the early-stopped weights of the study's best trial (`tune_arch(ckpt_path=...)` in
     [src/methods/sequence_training.py](src/methods/sequence_training.py)), so the end-of-job
     "refit" — an exact re-run of that trial, 3–4 h on AMLWorld — is skipped. It is keyed by the

@@ -72,6 +72,12 @@ export MKL_NUM_THREADS=$SLURM_CPUS_PER_TASK
 # job 62378415 were killed mid-refit. NOTE this job tunes BOTH architectures in 6h by default —
 # if that is tight, fan them out into separate tasks (`sbatch slurm/train_lstm.slurm <Dataset>
 # lstm`, then `transformer`) rather than raising the wall. Studies resume from SQLite on resubmit.
+# The refit is an exact re-run of the best trial, so it is normally SKIPPED now: each trial that
+# sets a new study best saves its weights to results/tuning/<study>_best_trial.pt and the job
+# scores the test band from them (see train_cnn_seq.slurm). The margin then only has to cover the
+# in-flight trial plus test scoring. A study whose best trial PREDATES the cache still refits if
+# no new trial beats it, so tune_arch holds that trial's duration back from the tuning time on top
+# of this margin (logged as "[cache] ... holding back").
 export SPARTA_WALL_MARGIN_S=${SPARTA_WALL_MARGIN_S:-3600}   # override per submission, e.g. with a shorter --time
 
 # Dataset from the submission argument; (timing x K x task) from the array index.
