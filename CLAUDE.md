@@ -144,6 +144,12 @@ time-windowed (snapshot) construction with optional exponential time-decay ("ech
     a `.db` with `n_trials` finished trials is the on-disk record that that cell is done
     (what [slurm/missing_runs.sh](slurm/missing_runs.sh) audits). Delete one by hand only to
     force a fresh search — required after changing a `search_space` categorical.
+    The CNN-LSTM / CNN-Transformer studies also keep `<study_name>_best_trial.pt` beside the
+    `.db`: the early-stopped weights of the study's best trial (`tune_arch(ckpt_path=...)` in
+    [src/methods/sequence_training.py](src/methods/sequence_training.py)), so the end-of-job
+    "refit" — an exact re-run of that trial, 3–4 h on AMLWorld — is skipped. It is keyed by the
+    best trial's params + value, so a stale file is ignored (the script then refits and
+    re-caches). Delete it together with its `.db`.
   - `results/models/` — saved `state_dict`s.
   - `results/predictions/` — per-row test scores (`y_true`, `anchor`, `node`, `score_<model>`), one parquet
     per metrics dump, written by `evaluation.save_predictions`. Compute any new metric from these; the

@@ -242,7 +242,7 @@ def make_pruner(cfg):
     return optuna.pruners.MedianPruner(**spec)
 
 
-def walltime_budget():
+def walltime_budget(reserve_s=0.0):
     """Seconds this job may still spend tuning before Slurm's wall-time kill, minus a
     safety margin — or ``None`` outside Slurm / on pre-23.02 Slurm (no ``SLURM_JOB_END_TIME``
     env var), where behaviour is unchanged. Pass as ``study.optimize(..., timeout=...)`` so
@@ -253,6 +253,10 @@ def walltime_budget():
     The margin (``SPARTA_WALL_MARGIN_S``, default 3600) must cover everything that runs
     AFTER the timeout fires: Optuna never interrupts an in-flight trial — it only stops
     STARTING new ones — so budget one worst-case trial plus the post-tuning refit/eval.
+    ``reserve_s`` is extra time held back on top of the margin for a refit the caller knows
+    it will need (see ``tune_arch``'s best-trial cache): when the study's best trial has no
+    saved weights, the refit costs about that trial's own duration, which can exceed the
+    whole margin on the long sequence cells.
     Call at each ``optimize()`` (not once up front): back-to-back studies in one job then
     each see the wall clock actually left.
     """
@@ -265,7 +269,7 @@ def walltime_budget():
     margin = int(os.environ.get("SPARTA_WALL_MARGIN_S", "3600"))
     # Floor of 60s: optuna checks elapsed-vs-timeout between trials, so even a tiny
     # budget runs at least one trial — same outcome as today's hard kill, never worse.
-    return max(60.0, end - time.time() - margin)
+    return max(60.0, end - time.time() - margin - reserve_s)
 
 
 def remaining_trials(study, n_trials):
@@ -285,9 +289,9 @@ def remaining_trials(study, n_trials):
     return max(0, n_trials - done)
 
 
-def optimize_study(study, objective, n_trials, label=None):
+def optimize_study(study, objective, n_trials, label=None, reserve_s=0.0):
     """Run ``study`` up to a TOTAL of ``n_trials`` finished trials, logging what storage
-    already held.
+    already held. ``reserve_s`` is forwarded to ``walltime_budget``.
 
     Wraps the ``study.optimize(objective, n_trials=remaining_trials(...),
     timeout=walltime_budget())`` call the experiment scripts share, so the per-study SQLite's
@@ -306,5 +310,5 @@ def optimize_study(study, objective, n_trials, label=None):
         return study
     print(f"[optuna] {name}: {n_trials - todo}/{n_trials} trials already in storage"
           f" -- running {todo} more", flush=True)
-    study.optimize(objective, n_trials=todo, timeout=walltime_budget())
+    study.optimize(objective, n_trials=todo, timeout=walltime_budget(reserve_s))
     return study

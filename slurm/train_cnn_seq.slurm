@@ -75,6 +75,14 @@ export MKL_NUM_THREADS=$SLURM_CPUS_PER_TASK
 # AMLWorld needs far more than 60 min: a K=7 nowcast trial ran 2 h 09 min (job 62581669, which hit
 # the wall with nothing written) and the final refit of the flat sibling took ~1 h 52 min. Override
 # per submission, e.g. `sbatch --time=12:00:00 --export=ALL,SPARTA_WALL_MARGIN_S=18000 ...`.
+# The final refit is an exact re-run of the best trial, so it is normally SKIPPED: each trial
+# that sets a new study best saves its weights to results/tuning/<study>_best_trial.pt and the
+# job scores the test band from them. The margin then only has to cover the in-flight trial
+# plus test scoring (AMLWorld's longest trial so far: 4 h 17 min, job 62668610 — whose 12 h
+# wall was spent mostly on a refit it never finished, so it wrote nothing). A study whose best
+# trial PREDATES the cache has no weights to reuse: if no new trial beats it the job refits,
+# so tune_arch holds that trial's own duration back from the tuning time on top of this margin
+# (logged as "[cache] ... holding back"). Once any job has finished such a cell it is cached.
 export SPARTA_WALL_MARGIN_S=${SPARTA_WALL_MARGIN_S:-3600}
 
 # Dataset from the submission argument; (timing x K x task) from the array index.

@@ -3,6 +3,8 @@
 # chunked prediction, early-stopped mini-batch training on a temporal val band, and one Optuna
 # study per architecture. Moved verbatim out of experiment_LSTM.py so both entry points share a
 # single implementation; the only change is that tune_arch takes the model factory as an argument.
+import os
+
 import numpy as np
 import optuna
 import torch
@@ -111,12 +113,80 @@ def train_model(model, values_t, train_bands, val_bands, device, loss="bce", lr=
     return best_ap, best_state
 
 
+def save_best_trial_state(path, state, params, value):
+    """Atomically write the weights of a study's best trial (temp file + os.replace, so a
+    wall-time kill mid-write leaves the previous cache intact, never a truncated one).
+
+    The cache is keyed by WHAT it holds — the trial's `params` and validation `value` — not by
+    a trial number: it stays valid exactly while the study's best trial has these params and
+    this value, and a study deleted and re-run under the same name can't pick up weights that
+    belong to a different search."""
+    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+    tmp = path + ".tmp"
+    torch.save({"state_dict": {k: v.detach().cpu() for k, v in state.items()},
+                "params": dict(params), "value": float(value)}, tmp)
+    os.replace(tmp, path)
+
+
+def load_best_trial_state(path, params, value, tol=1e-12):
+    """The cached state_dict (on CPU) if `path` holds the weights for exactly this best
+    (`params`, `value`), else None. None covers every reason the cache can't be trusted: no
+    file yet, an unreadable file, or weights that belong to a different best trial (a later
+    trial overtook them, or the study predates the cache) — the caller then refits."""
+    if not os.path.exists(path):
+        return None
+    try:
+        ck = torch.load(path, map_location="cpu", weights_only=True)
+    except Exception as exc:
+        print(f"[cache] unreadable best-trial cache {path} ({type(exc).__name__}) -- ignoring it",
+              flush=True)
+        return None
+    if ck.get("params") != dict(params) or abs(ck.get("value", float("nan")) - value) > tol:
+        return None
+    return ck["state_dict"]
+
+
+def _beats_study_best(study, value):
+    """True when `value` exceeds every COMPLETE trial already in `study` (the trial being
+    evaluated is still RUNNING, so it is not in that set). Mirrors what `study.best_value`
+    will be once this trial is recorded, so only genuine new bests are written to disk."""
+    done = [t.value for t in study.get_trials(deepcopy=False,
+                                              states=(optuna.trial.TrialState.COMPLETE,))
+            if t.value is not None]
+    return not done or value > max(done)
+
+
+def _refit_reserve_s(study, ckpt_path):
+    """Seconds the end-of-job refit will cost if no trial in THIS run overtakes the study's
+    best: zero when the best trial's weights are cached (nothing to refit) or the study has
+    no finished trial yet; otherwise that trial's own duration — a refit is the same
+    computation. Passed to `walltime_budget` so the refit gets wall time instead of being
+    killed mid-way, which is how a job that tuned for 12 h ended up writing nothing."""
+    try:
+        best = study.best_trial
+    except ValueError:                       # no COMPLETE trial yet: the first one is cached
+        return 0.0
+    if load_best_trial_state(ckpt_path, best.params, best.value) is not None:
+        return 0.0
+    return best.duration.total_seconds() if best.duration is not None else 0.0
+
+
 def tune_arch(make_model, arch, study_name, storage, n_trials, search_space, n_features,
-               values_t, train_bands, val_bands, device, pos_weight, patience, pruner=None):
+               values_t, train_bands, val_bands, device, pos_weight, patience, pruner=None,
+               ckpt_path=None):
     """One Optuna study for an architecture: maximise val-band AUC-PR via train_model.
     `make_model(arch, params, n_features)` builds the (untrained) model for a params dict.
     Returns (best_params, best_value). MedianPruner (via `pruner`) stops trials tracking below
-    the median early; per-study `storage` makes it resumable and n_trials tops up on resume."""
+    the median early; per-study `storage` makes it resumable and n_trials tops up on resume.
+
+    `ckpt_path` (optional) turns on the best-trial cache. The final refit on the best params
+    is the same computation as the best trial itself (same seed, same bands, same params), so
+    it only repeats hours of training the study already did. With `ckpt_path`, every trial that
+    sets a new study best saves its early-stopped weights there, and the caller can score the
+    test band from `load_best_trial_state(ckpt_path, best_params, best_value)` instead of
+    refitting. If the study's CURRENT best has no cached weights (a study from before the
+    cache, or a lost file), the refit still has to happen, so its expected cost is held back
+    from the tuning time budget. Without `ckpt_path` nothing changes."""
     def objective(trial):
         params = {name: suggest_param(trial, name, spec) for name, spec in search_space.items()}
         # Reseed before each trial (mirrors experiment_baseline.py's _fit_predict) so trials
@@ -125,11 +195,18 @@ def tune_arch(make_model, arch, study_name, storage, n_trials, search_space, n_f
         model = make_model(arch, params, n_features)
         # 'epochs' is the max_epochs upper bound; early stopping (patience) / pruning usually
         # end training sooner, so it mostly caps very-long runs rather than fixing length.
-        best_ap, _ = train_model(
+        best_ap, best_state = train_model(
             model, values_t, train_bands, val_bands, device,
             loss=params["loss"], lr=params["lr"], batch_size=params["batch_size"],
             max_epochs=params["epochs"], patience=patience, alpha=params["alpha"], gamma=params["gamma"],
             weight_decay=params.get("weight_decay", 1e-5), pos_weight=pos_weight, trial=trial)
+        # Keep the weights only when this trial becomes the study's best (a few MB per write,
+        # a handful of writes per study). Written BEFORE returning, so a kill after the trial
+        # ends can't lose them; a pruned trial raised above and never gets here.
+        if ckpt_path is not None and best_state is not None and _beats_study_best(trial.study, best_ap):
+            save_best_trial_state(ckpt_path, best_state, params, best_ap)
+            print(f"[cache] {study_name}: trial {trial.number} is the new best "
+                  f"(val AUC-PR {best_ap:.4f}) -- weights saved to {ckpt_path}", flush=True)
         return best_ap
 
     sampler = optuna.samplers.TPESampler(seed=SEED)
@@ -141,5 +218,10 @@ def tune_arch(make_model, arch, study_name, storage, n_trials, search_space, n_f
     # timeout so the final refit and metrics still get written. The budget is recomputed per
     # call — the second architecture's study gets whatever wall clock the first left over;
     # both top up on resubmit, and a study already at n_trials runs nothing at all.
-    optimize_study(study, objective, n_trials, label=study_name)
+    reserve_s = _refit_reserve_s(study, ckpt_path) if ckpt_path is not None else 0.0
+    if reserve_s:
+        print(f"[cache] {study_name}: the study's best trial has no cached weights -- holding "
+              f"back {reserve_s / 3600:.2f} h of wall time for the end-of-job refit in case no "
+              f"new trial beats it", flush=True)
+    optimize_study(study, objective, n_trials, label=study_name, reserve_s=reserve_s)
     return study.best_params, study.best_value

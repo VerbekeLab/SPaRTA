@@ -3,7 +3,8 @@
 # paper). Same windows, temporal split, scaler, losses and Optuna protocol as
 # scripts/experiment_LSTM.py — the flat-input LSTM/Transformer there is the "no CNN embedding"
 # ablation, so the two are directly comparable. Per architecture we run an Optuna study
-# (maximise val-band AUC-PR), train the best config on train with early-stop on the val band,
+# (maximise val-band AUC-PR), take the best config's weights (trained on train with early-stop
+# on the val band — cached by the study when its best trial finishes, refit only if missing),
 # then score the held-out test band. Shared training machinery lives in
 # src/methods/sequence_training.py. Minimalist style; heavy work lives under __main__.
 import os
@@ -27,7 +28,8 @@ from src.data.sequence_data import (build_sequence_windows, temporal_split,
                                      fit_scaler_compact, apply_scaler_compact)
 from src.methods.models import (LSTMClassifier, TransformerClassifier, FrameEncoder,
                                 CNNSequenceClassifier)
-from src.methods.sequence_training import predict, train_model, tune_arch
+from src.methods.sequence_training import (predict, train_model, tune_arch,
+                                           save_best_trial_state, load_best_trial_state)
 from src.methods import evaluation
 
 SEED = 1997
@@ -189,19 +191,37 @@ if __name__ == "__main__":
         space = {k: v for k, v in search_space.items()
                  if not (arch == "cnn_lstm" and k in ("head_dim", "nhead"))
                  and not (arch == "cnn_transformer" and k == "hidden")}
+        # The best trial's early-stopped weights are cached next to the study's SQLite (never
+        # deleted, like the .db): the "final refit" below is the same computation as that
+        # trial — same seed, bands and params — and on AMLWorld it costs 3-4 h, which a 12 h
+        # job tuning until its margin did not have left (job 62668610 wrote nothing).
+        trial_ckpt = f"results/tuning/{study_name}_best_trial.pt"
         best_params, best_value = tune_arch(
             make_model, arch, study_name, resolve_storage(cs_cfg, study_name=study_name),
             n_trials, space, n_features, values_t, train_bands, val_bands, device, pos_weight,
-            patience, pruner=make_pruner(cs_cfg))
+            patience, pruner=make_pruner(cs_cfg), ckpt_path=trial_ckpt)
         best_params_all[label] = {"best_params": best_params, "best_value_AUCPR": best_value}
 
         torch.manual_seed(SEED)
         model = make_model(arch, best_params, n_features)
-        train_model(model, values_t, train_bands, val_bands, device,
-                    loss=best_params["loss"], lr=best_params["lr"],
-                    batch_size=best_params["batch_size"], max_epochs=best_params["epochs"],
-                    patience=patience, alpha=best_params["alpha"], gamma=best_params["gamma"],
-                    weight_decay=best_params.get("weight_decay", 1e-5), pos_weight=pos_weight)
+        cached = load_best_trial_state(trial_ckpt, best_params, best_value)
+        if cached is not None:
+            model.load_state_dict(cached)
+            model.to(device)
+            print(f"[refit] {label}: reusing the best trial's weights (val AUC-PR "
+                  f"{best_value:.4f}) -- no refit", flush=True)
+        else:
+            # No weights for the study's current best (a study from before the cache, or the
+            # file is gone): refit as before, and cache the result so later top-ups that don't
+            # find a better trial skip this step.
+            print(f"[refit] {label}: no cached weights for the best trial -- refitting",
+                  flush=True)
+            train_model(model, values_t, train_bands, val_bands, device,
+                        loss=best_params["loss"], lr=best_params["lr"],
+                        batch_size=best_params["batch_size"], max_epochs=best_params["epochs"],
+                        patience=patience, alpha=best_params["alpha"], gamma=best_params["gamma"],
+                        weight_decay=best_params.get("weight_decay", 1e-5), pos_weight=pos_weight)
+            save_best_trial_state(trial_ckpt, model.state_dict(), best_params, best_value)
         scores[label] = predict(model, values_t, test_bands[0])
 
         torch.save(
