@@ -35,7 +35,7 @@ from torch_geometric.utils import degree, to_undirected
 
 from src.utils.setup import (load_config, resolve_dataset, resolve_timing, resolve_sequence,
                              run_tag, resolve_ts_cache_dir, resolve_window_store_dir,
-                             require_prebuilt_windows)
+                             require_prebuilt_windows, require_default_order)
 from src.data.network_data_loader import load_transactions
 from src.data.sequence_data import build_sequence_windows, temporal_split
 from src.data.utils.dates import define_dates
@@ -125,6 +125,7 @@ def train_graphsage(num_layers, train, train_seeds, val, val_seeds, cfg, device)
 
 
 if __name__ == "__main__":
+    require_default_order("experiment_GNN.py", "GraphSAGE uses only log(1 + degree), not the SPaRTA features.")
     np.random.seed(SEED)
 
     data_config = load_config("config/data/config.yaml")

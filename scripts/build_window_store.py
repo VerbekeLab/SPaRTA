@@ -21,7 +21,7 @@ from src.data.network_data_loader import load_transactions
 from src.data.utils.dates import define_dates
 from src.data import window_store
 from src.utils.setup import (load_config, resolve_dataset, resolve_timing, run_tag,
-                             resolve_window_store_dir)
+                             resolve_window_store_dir, resolve_order)
 
 if __name__ == "__main__":
     data_config = load_config("config/data/config.yaml")
@@ -54,7 +54,8 @@ if __name__ == "__main__":
               f"Delete its files to rebuild.")
         raise SystemExit(0)
 
-    print(f"Building window store | dataset={type_dataset} tag={tag} echo={echo} T={T}\n"
+    print(f"Building window store | dataset={type_dataset} tag={tag} echo={echo} T={T} "
+          f"order={resolve_order()}\n"
           f"  features_dir = {features_dir}\n  store_dir    = {store_dir}", flush=True)
     t0 = time.perf_counter()
     meta = window_store.build_store(store_dir, type_dataset, suffix, features_dir, T)

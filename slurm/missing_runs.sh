@@ -50,6 +50,17 @@ source slurm/sweep_common.sh
 
 MODELS="LSTM Transformer CNN-LSTM CNN-Transformer XGBoost NeuralNetwork IsolationForest
         Local-XGBoost Local-NeuralNetwork Local-IsolationForest GraphSAGE-1L GraphSAGE-2L"
+# First-order audit (SPARTA_ORDER=1 bash slurm/missing_runs.sh): the CNN-based models and
+# GraphSAGE have no first-order counterpart, so they are not part of that sweep. The stems below
+# come from decode_train -> SPARTA_RUN_TAG, which already carries the _o1 infix, so the dumps,
+# studies and .db files audited are the order-1 ones.
+if [[ "$SPARTA_ORDER" == "1" ]]; then
+    MODELS="LSTM Transformer XGBoost NeuralNetwork IsolationForest
+            Local-XGBoost Local-NeuralNetwork Local-IsolationForest"
+    SUBMIT_ENV="SPARTA_ORDER=1 "      # prefix for the printed resubmission commands
+else
+    SUBMIT_ENV=""
+fi
 TOTAL=$((N_TIMING * N_K * N_TASK))
 
 # Reading a study's trial count needs the sqlite3 CLI; without it every tuned cell that has a
@@ -154,7 +165,7 @@ for ds in "${datasets[@]}"; do
         echo "ERROR: no type_dataset for '$ds' in config/data/config.yaml" >&2
         exit 1
     fi
-    echo "=== $ds (files prefixed ${type}_; $TOTAL cells per model) ==="
+    echo "=== $ds (files prefixed ${type}_; $TOTAL cells per model; neighbourhood order $SPARTA_ORDER) ==="
     gaps=0
     for model in $MODELS; do
         kind=$(_kind_of "$model")
@@ -201,7 +212,7 @@ for ds in "${datasets[@]}"; do
             "$model" "${miss:-—}" "${topup:-—}" "${unknown:-—}"
         rerun=$(_sorted "${miss}${miss:+${topup:+,}}${topup}")
         if [ -n "$rerun" ]; then
-            printf '    -> sbatch --array=%s %s\n' "$rerun" "$(_submit_of "$model" "$ds")"
+            printf '    -> %ssbatch --array=%s %s\n' "$SUBMIT_ENV" "$rerun" "$(_submit_of "$model" "$ds")"
         fi
     done
     [ "$gaps" -eq 0 ] && echo "  all models complete for $ds"

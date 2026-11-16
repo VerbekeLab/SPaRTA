@@ -14,8 +14,16 @@
 #             GraphSAGE-1L / GraphSAGE-2L models of experiment_GNN.py)
 #   static:   {type}_features_{LogisticRegression|XGBoost|NN}.txt   (single-model dump)
 #   CNN:      {type}_CNN.txt                                        (write_metrics block, test split)
-# where tag matches <g><step>_(echo<days>|w<width>) with g the time_type initial
+# where tag matches <g><step>_(echo<days>|w<width>)[_o<order>] with g the time_type initial
 # (d=days, h=hours, ...), e.g. d1_echo3 / d2_w3 / h6_echo1.
+#
+# NEIGHBOURHOOD ORDER. The first-order baseline (SPARTA_ORDER=1) carries an `_o1` infix: in the tag
+# (d1_echo3_o1, before _K) and on the static type (HI-Small_o1_features_XGBoost.txt). Order-2 names
+# have no infix, so every existing file parses exactly as before. The `neighbourhood_order` column
+# (appended LAST, so positional readers are unaffected) is 2 or 1; `run_tag` keeps the full tag
+# incl. `_o1` ("static_o1" for static) so a consumer that ignores the new column sees first-order
+# rows as separate tags instead of silently mixing them into the order-2 groups; the static
+# `dataset` is stripped of `_o1`, so the two orders pair on (dataset, base tag, K, task, model).
 import os
 import sys
 DIR = "./"
@@ -37,8 +45,10 @@ OUT_PATH = os.path.join(EXP_DIR, "summary.csv")
 # ..._baselines_XGBoost.txt / ..._baselines_NeuralNetwork-IsolationForest.txt /
 # ..._timeseries_LSTM.txt. It is purely for filename uniqueness; the actual model names come
 # from the 'Model:' blocks inside.
+# The tag may end in the neighbourhood-order infix _o<order> (order 1 only; see run_tag). It sits
+# BEFORE _K, so it can never be mistaken for the trailing _<models> fan-out group.
 DYNAMIC_RE = re.compile(
-    r"^(?P<type>.+?)_(?P<tag>[a-z]\d+_(?:echo\d+|w\d+))_K(?P<K>\d+)_"
+    r"^(?P<type>.+?)_(?P<tag>[a-z]\d+_(?:echo\d+|w\d+)(?:_o(?P<order>\d+))?)_K(?P<K>\d+)_"
     r"(?P<task>nowcast|forecast)_(?P<kind>timeseries|cnnseq|baselines|local|gnn)"
     r"(?:_(?P<models>[A-Za-z][A-Za-z-]*))?\.txt$"
 )
@@ -57,6 +67,19 @@ _PREC0 = re.compile(r"^Precision:\s*\[\s*([0-9.eE+\-]+)", re.MULTILINE)
 def _f(m):
     """Float from a regex match, or None."""
     return float(m.group(1)) if m else None
+
+
+def peel_order(name):
+    """Split the neighbourhood-order infix off a static type: 'HI-Small_o1' -> ('HI-Small', 1),
+    'HI-Small' -> ('HI-Small', 2). (Dataset types hold hyphens but no '_', so a trailing
+    _o<digits> is unambiguous.)"""
+    m = re.fullmatch(r"(.+?)_o(\d+)", name)
+    return (m.group(1), int(m.group(2))) if m else (name, 2)
+
+
+def static_run_tag(order):
+    """run_tag of a static row: 'static' for order 2, 'static_o1' for order 1."""
+    return "static" if order == 2 else f"static_o{order}"
 
 
 def parse_write_metrics(text):
@@ -92,27 +115,33 @@ def collect():
         if m:
             # LSTM/baseline: multi-model write_metrics dump, scored on the test band.
             prefix = "Local " if m["kind"] == "local" else ""
+            order = int(m["order"]) if m["order"] else 2
             for model, (pr, roc, prev) in parse_write_metrics(text).items():
                 rows.append(dict(dataset=m["type"], run_tag=m["tag"], K=int(m["K"]),
                                  task=m["task"], model=prefix + model, split="test",
-                                 AUC_PR=pr, AUC_ROC=roc, PREVALENCE=prev))
+                                 AUC_PR=pr, AUC_ROC=roc, PREVALENCE=prev,
+                                 neighbourhood_order=order))
             continue
 
         s = STATIC_RE.match(fname)
         if s:
             # experiment_features: one model per file, single AUC PR / AUC ROC, test split.
-            rows.append(dict(dataset=s["type"], run_tag="static", K=None, task=None,
+            dataset, order = peel_order(s["type"])
+            rows.append(dict(dataset=dataset, run_tag=static_run_tag(order), K=None, task=None,
                              model={"NN": "NeuralNetwork"}.get(s["model"], s["model"]),
                              split="test", AUC_PR=_f(_PR.search(text)),
-                             AUC_ROC=_f(_ROC.search(text)), PREVALENCE=_f(_PREC0.search(text))))
+                             AUC_ROC=_f(_ROC.search(text)), PREVALENCE=_f(_PREC0.search(text)),
+                             neighbourhood_order=order))
             continue
 
         c = CNN_RE.match(fname)
         if c:
             # experiment_CNN: single-model write_metrics dump, scored on the test band.
+            dataset, order = peel_order(c["type"])
             for model, (pr, roc, prev) in parse_write_metrics(text).items():
-                rows.append(dict(dataset=c["type"], run_tag="static", K=None, task=None,
-                                 model=model, split="test", AUC_PR=pr, AUC_ROC=roc, PREVALENCE=prev))
+                rows.append(dict(dataset=dataset, run_tag=static_run_tag(order), K=None, task=None,
+                                 model=model, split="test", AUC_PR=pr, AUC_ROC=roc, PREVALENCE=prev,
+                                 neighbourhood_order=order))
             continue
 
         # *_HPT_features_XGBoost.txt and anything else are not metric dumps — skip quietly
@@ -121,12 +150,14 @@ def collect():
             unparsed.append(fname)
 
     df = pd.DataFrame(rows, columns=["dataset", "run_tag", "K", "task", "model",
-                                     "split", "AUC_PR", "AUC_ROC", "PREVALENCE"])
+                                     "split", "AUC_PR", "AUC_ROC", "PREVALENCE",
+                                     "neighbourhood_order"])
     # A per-model baseline fan-out and a combined all-models run of the same combo produce the
     # same (dataset, run_tag, K, task, model) metrics in two files; keep one so it isn't counted
-    # twice. keep="last" is arbitrary — they are identical (same seed, same code).
-    df = df.drop_duplicates(subset=["dataset", "run_tag", "K", "task", "model", "split"],
-                            keep="last")
+    # twice. keep="last" is arbitrary — they are identical (same seed, same code). The order is in
+    # the key so a first-order cell can never displace its order-2 counterpart.
+    df = df.drop_duplicates(subset=["dataset", "run_tag", "K", "task", "model", "split",
+                                    "neighbourhood_order"], keep="last")
     df = df.sort_values(["dataset", "run_tag", "task", "K", "model"],
                         na_position="first").reset_index(drop=True)
     return df, unparsed
@@ -141,16 +172,16 @@ if __name__ == "__main__":
     if len(df):
         # Coverage at a glance: which dynamic (dataset, tag, task) combos produced results,
         # so gaps (e.g. infeasible large-K cells that raised in temporal_split) are visible.
-        dyn = df[df["run_tag"] != "static"]
+        dyn = df[df["task"].notna()]          # static rows (any order) have no task / K
         if len(dyn):
             print("\nDynamic combos present (dataset | run_tag | task | K values):")
             for (ds, tag, task), g in dyn.groupby(["dataset", "run_tag", "task"]):
                 ks = sorted(int(k) for k in g["K"].dropna().unique())
-                print(f"  {ds:10s} | {tag:9s} | {task:8s} | K={ks}")
-        print("\nTop AUC-PR per dataset:")
-        for ds, g in df.dropna(subset=["AUC_PR"]).groupby("dataset"):
+                print(f"  {ds:10s} | {tag:12s} | {task:8s} | K={ks}")
+        print("\nTop AUC-PR per dataset (per neighbourhood order):")
+        for (ds, order), g in df.dropna(subset=["AUC_PR"]).groupby(["dataset", "neighbourhood_order"]):
             best = g.loc[g["AUC_PR"].idxmax()]
-            print(f"  {ds:10s} | {best['model']:16s} | {best['run_tag']}"
+            print(f"  {ds:10s} | order {order} | {best['model']:16s} | {best['run_tag']}"
                   f" K={best['K']} {best['task']} | AUC-PR={best['AUC_PR']:.4f}")
     if unparsed:
         print(f"\n[warn] {len(unparsed)} result file(s) had an AUC line but didn't match a "

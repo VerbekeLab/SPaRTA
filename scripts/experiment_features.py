@@ -18,18 +18,50 @@ import torch.nn as nn
 from sklearn.linear_model import LogisticRegression
 
 from sklearn.metrics import roc_auc_score, average_precision_score, roc_curve, precision_recall_curve
-from src.utils.setup import load_config, resolve_dataset, resolve_experiment, resolve_rescore
+from src.utils.setup import (load_config, resolve_dataset, resolve_experiment, resolve_rescore,
+                             resolve_order, static_stem)
 from src.methods import evaluation
-from src.utils.feature_io import load_table
+from src.utils.feature_io import find_table, load_table
 
 from src.methods.models import NeuralNetwork
 
-def data_prep_features(data_directory, dataset_type):
+def _reference_node_order(data_directory, ref_type):
+    """Node column of the ORDER-2 static feature table, in file order (None if absent)."""
+    path = find_table(f'{data_directory}/{ref_type}_static_features')
+    if path is None:
+        return None
+    if path.endswith('.parquet'):
+        return pd.read_parquet(path, columns=['node'])['node']
+    return pd.read_csv(path, usecols=['node'])['node']
+
+def data_prep_features(data_directory, dataset_type, ref_type=None):
+    """Static features + labels -> 80/20 split.
+
+    The split below is POSITIONAL (train_test_split on the merged frame), and the feature file's
+    row order is arbitrary (extraction collects worker results with imap_unordered). Two extractions
+    of the same graph therefore split differently — which would break a paired order-1 vs order-2
+    comparison. When ``ref_type`` is given (first-order runs) the rows are put in the order-2 table's
+    node order first, so both orders share the identical split. The order-2 path is untouched."""
     df_features = load_table(f'{data_directory}/{dataset_type}_static_features')
     df_labels = load_table(f'{data_directory}/{dataset_type}_static_labels')
     df_labels.columns = ['node', 'label']
 
     df = pd.merge(df_features, df_labels, on='node', how='inner')
+
+    if ref_type is not None:
+        ref_nodes = _reference_node_order(data_directory, ref_type)
+        if ref_nodes is None:
+            print(f"WARNING: no order-2 static table '{ref_type}_static_features' in {data_directory}; "
+                  f"the train/test split of this run is NOT guaranteed to match the order-2 run's.")
+        else:
+            rank = pd.Series(np.arange(len(ref_nodes)), index=ref_nodes.to_numpy())
+            pos = df['node'].map(rank)
+            if pos.isna().any():
+                raise ValueError(
+                    f"{int(pos.isna().sum())} nodes of {dataset_type}_static_features are absent from "
+                    f"{ref_type}_static_features: the two extractions saw different graphs.")
+            df = df.assign(_pos=pos.to_numpy()).sort_values('_pos', kind='stable') \
+                   .drop(columns='_pos').reset_index(drop=True)
 
     X = df.drop(columns=['node','label'])
     y = df['label']
@@ -177,7 +209,12 @@ if __name__ == "__main__":
     method_config = load_config("config/methods/config.yaml")
 
     network = resolve_dataset(data_config)
-    dataset_type = data_config[network]['type_dataset']
+    raw_type = data_config[network]['type_dataset']
+    # static_stem: HI-Small -> HI-Small_o1 under SPARTA_ORDER=1. Every read and write below
+    # (features, labels, metrics, HPT, predictions) is keyed on it, so the first-order run
+    # lives next to the order-2 one instead of overwriting it.
+    dataset_type = static_stem(raw_type)
+    ref_type = raw_type if resolve_order() != 2 else None
 
     # This script trains all three tabular models in one go; read each model's
     # params block. (resolve_experiment is kept for the data_directory lookup
@@ -190,7 +227,7 @@ if __name__ == "__main__":
     os.makedirs('results/experiments', exist_ok=True)
 
     rescore = resolve_rescore()   # SPARTA_RESCORE=1: refit, write only results/predictions/ (see setup.py)
-    X_train, X_test, y_train, y_test, node_test = data_prep_features(data_directory, dataset_type)
+    X_train, X_test, y_train, y_test, node_test = data_prep_features(data_directory, dataset_type, ref_type)
     scores = {
         'LogisticRegression': experiment_features_LogisticRegression(X_train, X_test, y_train, y_test, dataset_type, rescore),
         'XGBoost': experiment_features_XGBoost(X_train, X_test, y_train, y_test, dataset_type, xgb_params, rescore),

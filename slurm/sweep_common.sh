@@ -28,6 +28,30 @@
 # config/data/config.yaml).
 DATASETS=(AMLWorld AMLSim Tide)
 
+# Neighbourhood ORDER of the SPaRTA features (src/utils/setup.py:resolve_order):
+#   2 (default) = the paper's features, 3x3 picture of the 2-hop ego network (90 columns)
+#   1           = the first-order baseline: only the node's own in-/out-edges (20 columns)
+# Pick it per submission: `SPARTA_ORDER=1 bash slurm/submit.sh <script> <Dataset>` (sbatch forwards
+# the environment). ORDER_SUFFIX is the infix the python side puts in the run tag / static stems
+# ("" or "_o1"), so SPARTA_RUN_TAG below keeps matching src/utils/setup.py:run_tag. The grid
+# itself (tags, K, tasks, array ranges) is the same for both orders.
+SPARTA_ORDER="${SPARTA_ORDER:-2}"
+case "$SPARTA_ORDER" in
+    2) ORDER_SUFFIX="" ;;
+    1) ORDER_SUFFIX="_o1" ;;
+    *) echo "ERROR: SPARTA_ORDER must be 1 or 2 (got '$SPARTA_ORDER')" >&2; exit 1 ;;
+esac
+export SPARTA_ORDER
+
+# Abort a job that has no first-order counterpart (the CNN-based models read the 3x3 picture;
+# GraphSAGE uses only log-degree). Call right after sourcing this file.
+require_order2() {
+    if [[ "$SPARTA_ORDER" != "2" ]]; then
+        echo "ERROR: $1 has no first-order counterpart — submit it without SPARTA_ORDER (order 2)." >&2
+        exit 1
+    fi
+}
+
 # Resolve the dataset for a per-dataset submission: first script argument, else a
 # pre-set SPARTA_DATASET (e.g. `sbatch --export=ALL,SPARTA_DATASET=Tide <script>`).
 # Exits the job when neither is given or the name is unknown.
@@ -114,7 +138,9 @@ set_timing_env() {
     export SPARTA_ECHO="$(_grid TIMING_ECHO "$t")"
     export SPARTA_DAYS_ECHO="$(_grid TIMING_DAYS "$t")"
     export SPARTA_TIME_WIDTH="$(_grid TIMING_WIDTH "$t")"
-    export SPARTA_RUN_TAG="$(_grid TIMING_LABELS "$t")"   # informational: the dir this run uses
+    # informational: the dir this run uses (incl. the _o1 order infix, as run_tag builds it), and
+    # what slurm/missing_runs.sh / status.sh use to rebuild result stems
+    export SPARTA_RUN_TAG="$(_grid TIMING_LABELS "$t")${ORDER_SUFFIX}"
 }
 
 # Decode a 1D extraction index (timing combo) from $1; sets the timing env.
@@ -138,6 +164,7 @@ decode_train() {
 # When executed directly (not sourced), print the grids and array sizes as a sanity check.
 if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
     echo "N_TIMING=$N_TIMING N_K=$N_K N_TASK=$N_TASK (datasets submitted separately: ${DATASETS[*]})"
+    echo "neighbourhood order: SPARTA_ORDER=$SPARTA_ORDER (run-tag infix '${ORDER_SUFFIX}')"
     echo "extract array range (per dataset) : 0-$(( N_TIMING - 1 ))"
     echo "train   array range (per dataset) : 0-$(( N_TIMING * N_K * N_TASK - 1 ))"
     for SPARTA_DATASET in "${DATASETS[@]}"; do

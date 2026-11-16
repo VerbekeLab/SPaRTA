@@ -69,10 +69,10 @@ hdr "4. FEATURE EXTRACTION  (dynamic tables on disk vs expected snapshots)"
 for ds in "${datasets[@]}"; do
     SPARTA_DATASET=$ds; type=$(type_of "$ds"); T=$(expected_T "$ds")
     echo "$ds (prefix ${type}_, expected T~$T):"
-    n_static=$(ls results/features/ 2>/dev/null | grep -cE "^${type}_static_features\.(parquet|csv)$")
+    n_static=$(ls results/features/ 2>/dev/null | grep -cE "^${type}${ORDER_SUFFIX}_static_features\.(parquet|csv)$")
     echo "  static features present: $([ "$n_static" -gt 0 ] && echo yes || echo NO)"
     for ((t = 0; t < N_TIMING; t++)); do
-        tag=$(_grid TIMING_LABELS "$t")
+        tag="$(_grid TIMING_LABELS "$t")${ORDER_SUFFIX}"
         nf=$(ls "results/features/$tag" 2>/dev/null | grep -E "^${type}_dynamic_[0-9]+_features" | sed -E 's/\.(parquet|csv)$//' | sort -u | wc -l)
         nl=$(ls "results/features/$tag" 2>/dev/null | grep -E "^${type}_dynamic_[0-9]+_labels"   | sed -E 's/\.(parquet|csv)$//' | sort -u | wc -l)
         printf '  %-10s features %4s / labels %4s  of ~%s\n' "$tag" "$nf" "$nl" "$T"
@@ -88,7 +88,7 @@ echo "root: $root"
 for ds in "${datasets[@]}"; do
     SPARTA_DATASET=$ds
     for ((t = 0; t < N_TIMING; t++)); do
-        tag=$(_grid TIMING_LABELS "$t")
+        tag="$(_grid TIMING_LABELS "$t")${ORDER_SUFFIX}"
         meta=$(ls "$root/$tag"/*_meta.json 2>/dev/null | head -1)
         if [ -n "$meta" ]; then
             printf '  %-8s %-10s OK   %s\n' "$ds" "$tag" "$(python -c "import json,sys;m=json.load(open('$meta'));print('T=%s rows=%s nodes=%s'%(m['T'],m['n_rows'],m['n_nodes']))" 2>/dev/null)"
@@ -113,7 +113,12 @@ d = pd.read_csv(p)
 if d.empty:
     raise SystemExit("summary.csv is empty")
 pd.set_option("display.width", 200)
-dyn = d[d.run_tag != "static"].copy()
+# Only the neighbourhood order this status run is about (SPARTA_ORDER, default 2); the column is
+# absent from a summary.csv written before the first-order baseline existed (= all order 2).
+order = int(os.environ.get("SPARTA_ORDER", "2"))
+d = d[d.get("neighbourhood_order", 2) == order]
+print(f"(neighbourhood order {order}: {len(d)} rows)")
+dyn = d[d.task.notna()].copy()     # static rows (any order) carry no task / K
 print("\ncells with results (dataset x model x task; 12 per task = complete, 24 per model):")
 if len(dyn):
     c = (dyn.groupby(["dataset", "model", "task"]).size().unstack("task").fillna(0).astype(int))
@@ -126,7 +131,7 @@ if len(dyn):
     best = dyn.loc[idx, ["dataset", "task", "model", "run_tag", "K", "AUC_PR", "AUC_ROC"]].copy()
     best["K"] = best["K"].astype(int)
     print(best.round(3).to_string(index=False))
-st = d[d.run_tag == "static"]
+st = d[d.task.isna()]
 if len(st):
     print("\nstatic models (test AUC-PR / AUC-ROC):")
     print(st[["dataset", "model", "AUC_PR", "AUC_ROC"]].round(3).to_string(index=False))

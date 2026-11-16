@@ -112,7 +112,50 @@ def resolve_sequence(data_config: Dict[str, Any], network: str) -> Dict[str, Any
     return sq
 
 
-def run_tag(timing: Dict[str, Any]) -> str:
+def resolve_order() -> int:
+    """Neighbourhood order of the SPaRTA features: ``SPARTA_ORDER`` (default 2).
+
+    2 = the paper's features (3x3 picture of the 2-hop ego network, 90 columns).
+    1 = the first-order baseline (only the node's OWN in-/out-edges, 20 columns; see
+    src/data/feature_schema.py). Env-only on purpose, like the other per-task knobs: a Slurm
+    array task picks it with ``SPARTA_ORDER=1 sbatch ...`` and every script that derives a
+    path from :func:`run_tag` / :func:`static_stem` follows it without further edits.
+    """
+    raw = os.environ.get("SPARTA_ORDER", "").strip()
+    order = int(raw) if raw else 2
+    if order not in (1, 2):
+        raise ValueError(f"SPARTA_ORDER must be 1 or 2, got {raw!r}")
+    return order
+
+
+def order_suffix(order: int | None = None) -> str:
+    """Filename infix that namespaces a neighbourhood order: ``""`` for the default order 2
+    (so every existing path stays byte-identical) and ``"_o1"`` for order 1."""
+    order = resolve_order() if order is None else int(order)
+    return "" if order == 2 else f"_o{order}"
+
+
+def static_stem(type_dataset: str, order: int | None = None) -> str:
+    """Stem of the static (no-tag) feature/result files: ``HI-Small`` or ``HI-Small_o1``.
+
+    Apply it to OUTPUT / READ stems only — never to the ``type_dataset`` handed to the
+    loaders, which names the raw data on disk."""
+    return f"{type_dataset}{order_suffix(order)}"
+
+
+def require_default_order(script: str, why: str) -> None:
+    """Exit with a clear message when ``SPARTA_ORDER`` is not 2.
+
+    For the entry points that have no first-order counterpart (the CNN-based models need a 3x3
+    spatial picture; GraphSAGE uses only log-degree). Left unguarded, ``SPARTA_ORDER=1`` would
+    either crash with an opaque shape error or — for scripts that read the static 90-column
+    table without a tag — silently run on order-2 data and overwrite the order-2 results."""
+    if resolve_order() != 2:
+        raise SystemExit(f"{script}: {why} It has no first-order counterpart, so it must run with "
+                         f"SPARTA_ORDER unset (or 2); its order-2 results are the reference.")
+
+
+def run_tag(timing: Dict[str, Any], order: int | None = None) -> str:
     """Deterministic, filesystem-safe id for a timing combo — used to namespace the
     dynamic feature dir, the ``.npz`` cache, and the per-combo result/model files so a
     sweep's combos coexist instead of overwriting each other.
@@ -122,11 +165,20 @@ def run_tag(timing: Dict[str, Any]) -> str:
     ``w{time_width}``, both prefixed by the snapshot grid ``{time_type[0]}{time_step}``
     (e.g. ``d1``) so combos that share a grid — hence the same T and comparable
     K-windows — share a prefix: ``d1_echo3``, ``d1_echo7``, ``d1_w1``, ``d1_w3``.
+
+    The neighbourhood order (``order``; default ``SPARTA_ORDER``) is appended as an infix
+    ``_o1`` for the first-order baseline and nothing for the default order 2 — ``d1_echo3_o1``.
+    Because the tag keys the feature dir, window store, ``.npz`` cache and every study / model /
+    prediction / metrics stem, this single infix keeps a first-order run from ever reading or
+    overwriting a second-order artefact. It sits BEFORE ``_K{K}`` so the stems stay unambiguous
+    for the glob / regex consumers (collect_results.py, slurm/missing_runs.sh).
     """
     grid = f"{str(timing['time_type'])[0]}{int(timing['time_step'])}"
     if _as_bool(timing['echo']):
-        return f"{grid}_echo{int(timing['days_echo'])}"
-    return f"{grid}_w{int(timing['time_width'])}"
+        base = f"{grid}_echo{int(timing['days_echo'])}"
+    else:
+        base = f"{grid}_w{int(timing['time_width'])}"
+    return base + order_suffix(order)
 
 
 def resolve_ts_cache_dir(tag: str) -> str | None:

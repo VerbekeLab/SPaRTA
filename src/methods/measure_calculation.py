@@ -11,67 +11,73 @@ import pandas as pd
 from tqdm import tqdm
 from multiprocessing import Pool, cpu_count
 
-from src.utils.setup import load_config, resolve_dataset, resolve_dynamic, resolve_timing, run_tag
+from src.utils.setup import (load_config, resolve_dataset, resolve_dynamic, resolve_timing, run_tag,
+                             resolve_order, static_stem)
 from src.utils.graph_processing import graph_community
 from src.utils.feature_io import find_table, save_table
 
 from src.data.network_data_loader import *
 from src.data.utils.dates import define_dates
+from src.data.feature_schema import feature_columns, cell_indices
 from src.methods.neighbourhood_picture import *
 
 # Global variable for worker processes
 graph_for_worker = None
 graph_for_worker_rev = None
 graph_for_worker_undirected = None
+order_for_worker = 2
+cells_for_worker = cell_indices(2)
 
-def init_worker(graph, graph_rev, graph_undirected):
+def init_worker(graph, graph_rev, graph_undirected, order=2):
     """
-    Initializer for worker processes to set the graph in each subprocess.
+    Initializer for worker processes to set the graph (and the neighbourhood order) in each
+    subprocess.
     """
     global graph_for_worker
     global graph_for_worker_rev
     global graph_for_worker_undirected
+    global order_for_worker
+    global cells_for_worker
     graph_for_worker = graph
     graph_for_worker_rev = graph_rev
     graph_for_worker_undirected = graph_undirected
+    order_for_worker = order
+    cells_for_worker = cell_indices(order)
 
 def process_node(node):
+    # order 2: radius-2 ego network, all 9 cells (90 columns). order 1: radius-1 ego network,
+    # keep only the cells holding the node's own edges (01, 10) -> 20 columns. The row layout
+    # matches feature_columns(order), which names the DataFrame columns in process_graph.
     results = node_measures(
         node,
         graph_for_worker,
         graph_for_worker_undirected,
         graph_for_worker_rev,
-        output_tensor=False
+        output_tensor=False,
+        radius=order_for_worker
     )
-    results_list = [node] + results['measure'] + results['size']
+    cells = cells_for_worker
+    pick = lambda values: [values[i] for i in cells]
+    results_list = [node] + pick(results['measure']) + pick(results['size'])
 
     for weight in ['amount_trans', 'num_trans']:
         for agg in ['sum', 'mean', 'max', 'std']:
             key_measure = f'transaction_{weight}_summary_{agg}'
-            results_list += results[key_measure]
+            results_list += pick(results[key_measure])
 
     return tuple(results_list)
 
-keys_to_include = ['measure_00', 'measure_01', 'measure_02',
-                    'measure_10', 'measure_11', 'measure_12',
-                    'measure_20', 'measure_21', 'measure_22',
-                    'size_00', 'size_01', 'size_02',
-                    'size_10', 'size_11', 'size_12',
-                    'size_20', 'size_21', 'size_22',
-                    ]
+# The legacy 90-column order-2 schema. Kept under its historical name for notebooks and ad-hoc
+# imports; the pipeline itself reads src.data.feature_schema.feature_columns(order).
+keys_to_include = feature_columns(2)
 
 weights = ['amount_trans', 'num_trans']
 aggregations = ['sum', 'mean', 'max', 'std']
 
-for weight in weights:
-    for agg in aggregations:
-        for suff in ['00', '01', '02', '10', '11', '12', '20', '21', '22']:
-            key_measure = f'transaction_{weight}_summary_{agg}_{suff}'
-            keys_to_include.append(key_measure)
-
 n_cpu = min(4, cpu_count() // 2)
 
-def process_graph(G):
+def process_graph(G, order=None):
+    order = resolve_order() if order is None else order
     G_reduced = graph_community(G)
     G_und = G_reduced.to_undirected()
     G_rev = G_reduced.reverse(copy=True)
@@ -83,18 +89,18 @@ def process_graph(G):
     # full chunk completes). ~200 chunks/worker gives a smooth bar; the per-result
     # IPC cost is negligible for these lightweight tuples.
     chunksize = max(1, len(nodes) // (n_cpu * 200))
-    print(f"Number of nodes: {len(nodes)} | Using {n_cpu} processes")
+    print(f"Number of nodes: {len(nodes)} | Using {n_cpu} processes | neighbourhood order {order}")
     with Pool(
         processes=n_cpu,
         initializer=init_worker,
-        initargs=(G_reduced, G_rev, G_und,)
+        initargs=(G_reduced, G_rev, G_und, order)
     ) as pool:
         # imap_unordered surfaces each chunk as soon as ANY worker finishes it
         # (ordered imap would block on chunk 0 even if later chunks are ready).
         # Order is irrelevant here: every row embeds its own node id (see process_node).
         results = list(tqdm(pool.imap_unordered(process_node, nodes, chunksize=chunksize), total=len(nodes)))
 
-    return pd.DataFrame(results, columns=['node'] + keys_to_include)
+    return pd.DataFrame(results, columns=['node'] + feature_columns(order))
 
 if __name__ == "__main__":
     # Own our output directory instead of relying on the Slurm wrapper's mkdir: the
@@ -120,6 +126,7 @@ if __name__ == "__main__":
         echo = timing['echo']
         days_echo = timing['days_echo']
 
+        # run_tag carries the neighbourhood order (infix _o1 for the first-order baseline).
         out_dir = os.path.join("results/features", run_tag(timing))
 
     if network in ('AMLWorld', 'AMLSim', 'Tide'):
@@ -197,9 +204,12 @@ if __name__ == "__main__":
             G, labels = construct_network(dataset=network, type_dataset=type_dataset)
             df = process_graph(G)
 
-            out_path_features = save_table(df, f"results/features/{type_dataset}_static_features")
+            # static_stem: HI-Small -> HI-Small_o1 for the first-order baseline, so it never
+            # overwrites the order-2 tables (dynamic runs are namespaced by run_tag instead).
+            stem_static = static_stem(type_dataset)
+            out_path_features = save_table(df, f"results/features/{stem_static}_static_features")
             print(f"Results saved to {out_path_features}")
-            out_path_labels = save_table(labels.reset_index(), f"results/features/{type_dataset}_static_labels")
+            out_path_labels = save_table(labels.reset_index(), f"results/features/{stem_static}_static_labels")
             print(f"Labels saved to {out_path_labels}")
 
     else:

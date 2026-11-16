@@ -52,6 +52,7 @@ export OMP_NUM_THREADS=$SLURM_CPUS_PER_TASK
 export MKL_NUM_THREADS=$SLURM_CPUS_PER_TASK
 
 source slurm/sweep_common.sh
+require_order2 "train_gnn.slurm (GraphSAGE uses only log(1 + degree), so its order-2 results are the reference)"
 resolve_dataset_arg "${1:-}"
 decode_train "$SLURM_ARRAY_TASK_ID"
 

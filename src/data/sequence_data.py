@@ -12,11 +12,19 @@ import torch
 
 from src.data.utils.dates import define_dates
 from src.data.network_data_loader import load_transactions
-from src.methods.measure_calculation import keys_to_include  # 90 feature columns, canonical order
+from src.data.feature_schema import feature_columns  # canonical column order, per neighbourhood order
 from src.utils.feature_io import find_table, load_table
+from src.utils.setup import resolve_order
 
 SEED = 1997
-N_FEATURES = len(keys_to_include)  # 90
+N_FEATURES = len(feature_columns(2))  # 90 — the order-2 width; the active order's columns come from _columns()
+
+
+def _columns():
+    """Feature columns of the ACTIVE neighbourhood order (SPARTA_ORDER): the 90 SPaRTA columns
+    for order 2, the 20 own-edge columns for the first-order baseline (see feature_schema.py).
+    Resolved per call so one process can never mix the two layouts."""
+    return feature_columns(resolve_order())
 
 
 def _snapshot_index(anchor, step, K, task):
@@ -32,7 +40,7 @@ def _expand_windows(values, idx):
     `idx` [N, K] points into it (-1 = node absent at that step)."""
     mask = idx >= 0
     if len(values) == 0:
-        return np.zeros((*idx.shape, N_FEATURES), dtype=np.float32), mask
+        return np.zeros((*idx.shape, values.shape[-1]), dtype=np.float32), mask
     X = values[np.maximum(idx, 0)]
     X[~mask] = 0.0
     return X, mask
@@ -40,8 +48,9 @@ def _expand_windows(values, idx):
 
 def _load_snapshot(i, type_dataset, suffix, features_dir):
     """Read snapshot i's features + labels (Parquet preferred, legacy CSV fallback),
-    validate 90 cols, return a node-indexed DataFrame of the 90 features plus an
-    `is_laundering` column."""
+    validate the active order's columns (90 for order 2, 20 for order 1), return a node-indexed
+    DataFrame of the features plus an `is_laundering` column."""
+    cols = _columns()
     feat_stem = os.path.join(features_dir, f"{type_dataset}_dynamic_{i}_features{suffix}")
     label_stem = os.path.join(features_dir, f"{type_dataset}_dynamic_{i}_labels{suffix}")
     feat_path = find_table(feat_stem)
@@ -61,12 +70,13 @@ def _load_snapshot(i, type_dataset, suffix, features_dir):
     # Parquet keeps the node column's written dtype (possibly int); normalise to
     # str to match the CSV parse hint above and the labels' Account cast below.
     features["node"] = features["node"].astype(str)
-    missing = [c for c in keys_to_include if c not in features.columns]
+    missing = [c for c in cols if c not in features.columns]
     if missing:
         raise ValueError(
             f"{feat_path} carries {len(features.columns)} columns and is missing "
-            f"{len(missing)} of the {N_FEATURES} required feature columns "
-            f"(first missing: {missing[0]}). This is the legacy 19-column variant; "
+            f"{len(missing)} of the {len(cols)} required feature columns for neighbourhood "
+            f"order {resolve_order()} (first missing: {missing[0]}). Either this is the legacy "
+            f"19-column variant or the features were extracted with a different SPARTA_ORDER; "
             f"regenerate with src/methods/measure_calculation.py (time_dynamic=True)."
         )
 
@@ -173,6 +183,7 @@ def build_sequence_windows(dataset, type_dataset, echo, K, task,
         return d["values"], d["idx"], d["y"], d["anchors"], nodes
 
     # Load + validate every snapshot once.
+    cols = _columns()
     snapshots = [_load_snapshot(i, type_dataset, suffix, features_dir) for i in range(T)]
 
     first_anchor = K - 1 if task == "nowcast" else K
@@ -198,7 +209,7 @@ def build_sequence_windows(dataset, type_dataset, echo, K, task,
                     if r is None:
                         r = len(values_rows)
                         values_rows.append(
-                            snap.loc[node, keys_to_include].to_numpy(dtype=np.float32))
+                            snap.loc[node, cols].to_numpy(dtype=np.float32))
                         row_cache[(si, node)] = r
                     win_idx[step] = r
             idx_rows.append(win_idx)
@@ -210,7 +221,7 @@ def build_sequence_windows(dataset, type_dataset, echo, K, task,
     # AMLWorld scale, and values_rows/idx_rows are second copies of their arrays. The dedup
     # layout keeps the build's peak well below the old ~2x-the-final-X: values is ~1/K of X.
     del snapshots, row_cache
-    values = np.asarray(values_rows, dtype=np.float32).reshape(-1, N_FEATURES)
+    values = np.asarray(values_rows, dtype=np.float32).reshape(-1, len(cols))
     del values_rows
     idx = np.asarray(idx_rows, dtype=np.int32).reshape(-1, K)
     del idx_rows

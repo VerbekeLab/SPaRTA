@@ -11,14 +11,15 @@
 # arithmetic in seconds, touching no feature files and no transaction file.
 #
 # LAYOUT (one set of files per tag directory, prefixed by {type_dataset}{suffix}):
-#   _values.npy         [M, 90] float32  every snapshot's 90 feature columns, stacked
+#   _values.npy         [M, F]  float32  every snapshot's F feature columns (F=90 for neighbourhood
+#                                        order 2, 20 for the first-order baseline), stacked
 #                                        snapshot-major; within a snapshot, rows keep the
 #                                        feature FILE's order (see ORDERING below)
 #   _offsets.npy        [T+1]   int64    snapshot i occupies values[offsets[i]:offsets[i+1]]
 #   _node_codes.npy     [M]     int32    each row's node, as an index into _node_universe
 #   _node_universe.npy  [U]     <U       sorted unique node ids
 #   _labels.npy         [M]     float32  is_laundering per (snapshot, node) cell
-#   _meta.json                           T, M, U, the 90 column names, format version
+#   _meta.json                           T, M, U, the column names, neighbourhood order, format version
 #
 # ORDERING. Rows stay in the feature file's order rather than sorted, so the derived
 # (idx, y, anchors, nodes) come out in exactly the order the old row-by-row builder emitted —
@@ -31,8 +32,8 @@ import os
 import numpy as np
 import pandas as pd
 
-from src.data.sequence_data import _load_snapshot, _snapshot_index, N_FEATURES
-from src.methods.measure_calculation import keys_to_include
+from src.data.sequence_data import _load_snapshot, _snapshot_index, _columns
+from src.utils.setup import resolve_order
 
 FORMAT_VERSION = 1
 
@@ -80,10 +81,11 @@ def build_store(store_dir, type_dataset, suffix, features_dir, T, verbose=True):
     Written to a per-process temp dir and os.replace'd into place part by part, so a reader
     never sees a partial store (mirrors the atomic .npz write it replaces)."""
     os.makedirs(store_dir, exist_ok=True)
+    cols = _columns()           # the active neighbourhood order's columns (90 for 2, 20 for 1)
     blocks, label_parts, node_parts, counts = [], [], [], []
     for i in range(T):
         snap = _load_snapshot(i, type_dataset, suffix, features_dir)
-        blocks.append(snap[keys_to_include].to_numpy(dtype=np.float32))
+        blocks.append(snap[cols].to_numpy(dtype=np.float32))
         label_parts.append(snap["is_laundering"].to_numpy(dtype=np.float32))
         node_parts.append(snap.index.to_numpy().astype(str))
         counts.append(len(snap))
@@ -105,7 +107,8 @@ def build_store(store_dir, type_dataset, suffix, features_dir, T, verbose=True):
 
     meta = {"format_version": FORMAT_VERSION, "type_dataset": type_dataset, "suffix": suffix,
             "T": int(T), "n_rows": int(values.shape[0]), "n_nodes": int(len(node_universe)),
-            "n_features": int(values.shape[1]), "feature_columns": list(keys_to_include),
+            "n_features": int(values.shape[1]), "feature_columns": list(cols),
+            "neighbourhood_order": resolve_order(),
             "features_dir": features_dir, "snapshot_counts": [int(c) for c in counts]}
 
     paths = store_paths(store_dir, type_dataset, suffix)
@@ -134,11 +137,22 @@ def load_window_store(store_dir, type_dataset, suffix, mmap=True):
         raise ValueError(
             f"{paths['meta']} is format version {meta.get('format_version')}, this code reads "
             f"{FORMAT_VERSION}. Rebuild with scripts/build_window_store.py.")
-    if meta.get("feature_columns") != list(keys_to_include):
+    # The order is part of the tag (run_tag adds _o1), so a store is normally only found by the
+    # run that wants it; this guard catches a repointed store dir / hand-set SPARTA_WINDOW_STORE
+    # that would otherwise hand a first-order job the 90-column block (or the reverse).
+    # Stores written before the order existed carry no key and are order 2 by definition.
+    store_order = meta.get("neighbourhood_order", 2)
+    if store_order != resolve_order():
+        raise ValueError(
+            f"{paths['meta']} holds neighbourhood-order-{store_order} features but this job runs "
+            f"with SPARTA_ORDER={resolve_order()}. Point SPARTA_WINDOW_STORE at the matching store "
+            f"or rebuild it with scripts/build_window_store.py.")
+    cols = _columns()
+    if meta.get("feature_columns") != list(cols):
         raise ValueError(
             f"{paths['meta']} was built from a different feature schema "
-            f"({meta.get('n_features')} columns) than measure_calculation.keys_to_include "
-            f"({N_FEATURES}). Rebuild the store with scripts/build_window_store.py.")
+            f"({meta.get('n_features')} columns) than feature_schema.feature_columns("
+            f"{resolve_order()}) ({len(cols)}). Rebuild the store with scripts/build_window_store.py.")
     return WindowStore(
         values=np.load(paths["values"], mmap_mode="r" if mmap else None),
         offsets=np.load(paths["offsets"]),

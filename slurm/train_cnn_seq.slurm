@@ -87,6 +87,7 @@ export SPARTA_WALL_MARGIN_S=${SPARTA_WALL_MARGIN_S:-3600}
 
 # Dataset from the submission argument; (timing x K x task) from the array index.
 source slurm/sweep_common.sh
+require_order2 "train_cnn_seq.slurm (the per-frame CNN encoder reads the 3x3 SPaRTA picture)"
 resolve_dataset_arg "${1:-}"
 decode_train "$SLURM_ARRAY_TASK_ID"
 

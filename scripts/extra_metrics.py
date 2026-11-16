@@ -24,23 +24,26 @@ import glob
 
 import pandas as pd
 
-from scripts.collect_results import DYNAMIC_RE, EXP_DIR
+from scripts.collect_results import DYNAMIC_RE, EXP_DIR, peel_order, static_run_tag
 from src.methods import evaluation
 
 OUT_PATH = os.path.join(EXP_DIR, "extra_metrics.csv")
 STATIC_MODEL = {"NN": "NeuralNetwork"}      # same renaming as collect_results.py
-KEYS = ["dataset", "run_tag", "K", "task", "model", "split"]
+KEYS = ["dataset", "run_tag", "K", "task", "model", "split", "neighbourhood_order"]
 
 
 def describe(basename):
-    """(dataset, run_tag, K, task, model-prefix) for a predictions file, or None. The dynamic
-    names are the metrics dumps' with .parquet for .txt, so collect_results' regex applies."""
+    """(dataset, run_tag, K, task, model-prefix, neighbourhood_order) for a predictions file, or
+    None. The dynamic names are the metrics dumps' with .parquet for .txt, so collect_results'
+    regex applies; run_tag / dataset follow collect_results' conventions for the order-1 infix."""
     m = DYNAMIC_RE.match(basename[:-len(".parquet")] + ".txt")
     if m:
-        return m["type"], m["tag"], int(m["K"]), m["task"], "Local " if m["kind"] == "local" else ""
+        return (m["type"], m["tag"], int(m["K"]), m["task"],
+                "Local " if m["kind"] == "local" else "", int(m["order"]) if m["order"] else 2)
     for suffix in ("_features.parquet", "_CNN.parquet"):
         if basename.endswith(suffix):
-            return basename[:-len(suffix)], "static", None, None, ""
+            dataset, order = peel_order(basename[:-len(suffix)])
+            return dataset, static_run_tag(order), None, None, "", order
     return None
 
 
@@ -52,11 +55,12 @@ def main(ks, fracs, r_precision):
         if info is None:
             skipped.append(base)
             continue
-        dataset, tag, K, task, prefix = info
+        dataset, tag, K, task, prefix, order = info
         y, scores, _ = evaluation.load_predictions(path)
         for model, s in scores.items():
             rows.append({"dataset": dataset, "run_tag": tag, "K": K, "task": task,
                          "model": prefix + STATIC_MODEL.get(model, model), "split": "test",
+                         "neighbourhood_order": order,
                          "n_test": len(y), "n_pos": int(y.sum()),
                          **evaluation.extra_metrics(y, s, ks=ks, fracs=fracs,
                                                        r_precision=r_precision)})

@@ -87,10 +87,14 @@ def transaction_measures(G_ego_second, size_0, size_1, nodes_ordered, aggregatio
 
     return results_transaction
 
-def node_measures(node, G_copy, G_copy_und, G_copy_rev, output_tensor = True):
-    G_ego_second_und = nx.ego_graph(G_copy_und, node, radius=2)
+def node_measures(node, G_copy, G_copy_und, G_copy_rev, output_tensor = True, radius = 2):
+    # radius=2 is the SPaRTA ego network (default, unchanged). radius=1 builds the first-order
+    # ego network: node_selection then yields groups (1, deg, 0), so only the cells holding the
+    # node's own edges (01, 10) and the neighbour<->neighbour block (11) are non-zero. The frozen
+    # selection / measure functions are reused as they are — see src/data/feature_schema.py.
+    G_ego_second_und = nx.ego_graph(G_copy_und, node, radius=radius)
     G_ego_second = nx.subgraph(G_copy, G_ego_second_und.nodes)
-    G_ego_second_rev = nx.ego_graph(G_copy_rev, node, 2)
+    G_ego_second_rev = nx.ego_graph(G_copy_rev, node, radius)
 
     nodes_0, nodes_1, nodes_2, nodes_ordered = node_selection(G_ego_second, G_ego_second_und, G_ego_second_rev, node)
 

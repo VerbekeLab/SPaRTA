@@ -24,7 +24,8 @@ from src.data.feature_data import ImageDataset
 from src.methods.models import CNN
 from src.methods import evaluation
 from src.utils.setup import (load_config, resolve_dataset, suggest_param,
-                             resolve_storage, make_pruner, optimize_study, resolve_rescore)
+                             resolve_storage, make_pruner, optimize_study, resolve_rescore,
+                             require_default_order)
 from src.utils.feature_io import load_table
 
 SEED = 1997
@@ -134,6 +135,7 @@ def _tune_cnn(study_name, storage, n_trials, search_space, num_channels,
 
 
 if __name__ == "__main__":
+    require_default_order("experiment_CNN.py", "The CNN reads the 3x3 SPaRTA picture.")
     device = torch.device("cuda" if torch.cuda.is_available()
                           else "mps" if torch.backends.mps.is_available() else "cpu")
     print(f"Training on: {device}")

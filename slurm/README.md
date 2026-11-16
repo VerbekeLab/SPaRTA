@@ -281,11 +281,65 @@ LogisticRegression (lbfgs hits `max_iter`) and static NN (weight init was unseed
 change) may show `DIFF` — their saved scores are then those of the refit, not of the run behind the old `.txt`.
 VGG16 is not covered.
 
+## First-order baseline: is the 2nd-order neighbourhood needed? (`SPARTA_ORDER=1`)
+
+The same experiments, but on features built only from each node's **own** transactions (its
+in-/out-edges to its 1-hop neighbours; no neighbour↔neighbour edges, no second hop). It is the
+`SPARTA_ORDER` axis: unset / `2` = the paper's 90-column SPaRTA features, `1` = **20 columns**
+(cells 01 = out-edges, 10 = in-edges, × the 10 channels; `src/data/feature_schema.py`). The
+existing 2-hop feature files cannot be masked into this — group 0 of the 2-hop picture also holds
+off-path 2-hop nodes, so its 01/10 cells are *not* just the node's own edges for most nodes — so
+it needs its own extraction. Same graph, node set, labels and temporal split as order 2, so the
+two are paired cell by cell.
+
+`SPARTA_ORDER=1` adds an `_o1` infix to the run tag (`d1_echo3` → `d1_echo3_o1`, **before** `_K…`)
+and to the static stems (`HI-Small` → `HI-Small_o1`). That one infix separates the feature dir, the
+window store, the `.npz` cache, every Optuna study / `.db` / `_best_trial.pt`, models, predictions
+and metrics from the order-2 ones, so nothing is reused or overwritten; order-2 names are unchanged.
+sbatch forwards the environment, so prefix the submissions (or run the block in a subshell — do
+**not** leave `SPARTA_ORDER=1` exported in your login shell, or your next order-2 submission
+silently becomes order 1):
+
+```bash
+cd $VSC_DATA/SPaRTA
+DS=AMLWorld           # then repeat with AMLSim, Tide
+(
+  export SPARTA_ORDER=1
+  EXTRACT_STATIC=$(bash slurm/submit.sh slurm/extract_features.slurm $DS --parsable)
+  EXTRACT_DYN=$(bash slurm/submit.sh slurm/extract_features_dynamic.slurm $DS --parsable)
+  WINDOWS=$(bash slurm/submit.sh slurm/build_windows.slurm $DS --parsable --dependency=afterok:$EXTRACT_DYN)
+  bash slurm/submit.sh slurm/train_features.slurm $DS --dependency=afterok:$EXTRACT_STATIC   # static LogReg/XGBoost/NN
+  bash slurm/submit.sh slurm/train_lstm.slurm $DS --dependency=afterok:$WINDOWS              # LSTM + Transformer (flat)
+  bash slurm/submit.sh slurm/train_baseline.slurm $DS --dependency=afterok:$WINDOWS          # XGBoost + IsolationForest
+  bash slurm/submit.sh slurm/train_baseline_nn.slurm $DS --dependency=afterok:$WINDOWS       # MLP
+  bash slurm/submit.sh slurm/train_local.slurm $DS --dependency=afterok:$WINDOWS             # local view
+  bash slurm/submit.sh slurm/train_local_nn.slurm $DS --dependency=afterok:$WINDOWS
+)
+```
+
+Job names get an `_o1` suffix (`slurm/submit.sh`). **Not run for order 1** — the scripts refuse
+`SPARTA_ORDER=1` with a clear message: `train_cnn.slurm` / `train_cnn_seq.slurm` (the CNN needs the
+3×3 picture, so the paper's CNN-LSTM has no first-order counterpart) and `train_gnn.slurm`
+(GraphSAGE uses only log-degree; its order-2 results are the reference). Audit and monitor the
+order-1 sweep with the same env: `SPARTA_ORDER=1 bash slurm/missing_runs.sh AMLSim` /
+`SPARTA_ORDER=1 bash slurm/status.sh` (CNN-seq/GNN are left out of the audit). Resubmission commands
+it prints carry the `SPARTA_ORDER=1` prefix.
+
+`collect_results.py` keeps both orders in `summary.csv`: `run_tag` retains the infix
+(`d1_echo3_o1`, `static_o1`) and a new last column `neighbourhood_order` is 2 or 1. Then
+`python scripts/compare_orders.py` pairs the cells and writes `results/experiments/order_comparison.csv`
+(d = metric(order 2) − metric(order 1); positive = the second hop helps). `--bootstrap 200
+--only AMLSim` adds a paired bootstrap of ΔAUC-PR over the shared test rows from
+`results/predictions/` (it first checks both orders scored the same rows). The checks live in
+`tests/test_first_order_features.py` (run with the `SPaRTA_env` interpreter).
+
 ## Outputs
 
 - `results/features/<tag>/{type}_dynamic_{i}_features_echo.parquet` — per-combo dynamic
-  features (`_w` combos drop the `_echo` suffix; readers also accept legacy `.csv`).
-- `results/features/{type}_static_features.parquet` — static features (flat, shared).
+  features (`_w` combos drop the `_echo` suffix; readers also accept legacy `.csv`). The first-order
+  baseline writes the same files under `results/features/<tag>_o1/`.
+- `results/features/{type}_static_features.parquet` — static features (flat, shared); first-order:
+  `{type}_o1_static_features.parquet`.
 - `results/timeseries/<tag>/…npz` — per-combo windowed cache (the tag kills the stale-cache bug).
 - `results/experiments/{type}_{tag}_K{K}_{task}_{timeseries|cnnseq|baselines|local|gnn}.txt|.png` — per-combo metrics.
 - `results/experiments/{type}_CNN.txt|.png` — static CNN test metrics (timing-independent).

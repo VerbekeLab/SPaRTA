@@ -57,6 +57,26 @@ time-windowed (snapshot) construction with optional exponential time-decay ("ech
   `(X, mask, y, anchors, nodes)` are bit-identical to the old builder's. GPU jobs set
   `SPARTA_REQUIRE_WINDOWS=1` so a missing store fails fast rather than costing ~40 min of
   single-threaded pandas with an idle A100; `SPARTA_WINDOW_STORE=off` restores the old path.
+- **Neighbourhood order / first-order baseline (`SPARTA_ORDER`)** — default `2` = the paper's 90-column
+  SPaRTA features; `1` = the baseline that answers "is the 2nd-order neighbourhood needed?": the
+  node's **own** in-/out-edges only (cells 01 and 10 of the same code run on a radius-1 ego graph —
+  `node_measures(..., radius=1)` — **20 columns**; no neighbour↔neighbour cell 11). Column schema per order
+  lives in [src/data/feature_schema.py](src/data/feature_schema.py) (`feature_columns(order)`; pure python —
+  `sequence_data`/`window_store` read the active order's columns from it, not from `measure_calculation`).
+  `resolve_order` / `order_suffix` / `static_stem` / `require_default_order` are in `src/utils/setup.py`.
+  Order 1 adds an **`_o1` infix to `run_tag` (`d1_echo3_o1`, before `_K…`) and to the static stems
+  (`HI-Small_o1`)**, which namespaces features, window store, `.npz` cache, Optuna studies/`.db`/
+  `_best_trial.pt`, models, predictions and metrics in one go; order-2 names are byte-identical to before.
+  Existing 2-hop files can't be masked into order 1 (group 0 of the 2-hop picture holds off-path nodes, so
+  its 01/10 cells are not pure own-edge statistics) — it is re-extracted. Run for order 1: static
+  LogReg/XGBoost/NN, LSTM/Transformer, window baselines (+ local view). **Not** run (refused by
+  `require_default_order` / `require_order2`): CNN, CNN-LSTM/Transformer (need the 3×3 picture) and GraphSAGE
+  (log-degree only; order-2 results are the reference). The static first-order split is aligned to the order-2
+  table's row order (`experiment_features.data_prep_features`), because extraction row order is arbitrary
+  (`imap_unordered`) and the split is positional. Reporting: `summary.csv` has a `neighbourhood_order` column
+  and `run_tag` keeps the infix; [scripts/compare_orders.py](scripts/compare_orders.py) pairs the cells (and
+  optionally a paired bootstrap); checks in [tests/test_first_order_features.py](tests/test_first_order_features.py).
+  Runbook: `slurm/README.md` ("First-order baseline"). Never leave `SPARTA_ORDER=1` exported in a login shell.
 - **Network → image renderer** — [src/methods/visualising_network.py](src/methods/visualising_network.py)
   renders 224×224 RGB PNGs of each node's 2-hop subgraph via igraph + cairo, packs
   bits, and writes batched `.pkl` + `.h5` to `results/pickle/`.
@@ -132,7 +152,8 @@ time-windowed (snapshot) construction with optional exponential time-decay ("ech
   `os.chdir("./"); sys.path.append("./")` and must be **run from the repo root**.
 - **Output layout:**
   - `results/features/` — extracted measure tables, zstd Parquet (one features + one
-    labels per run; pre-migration runs may still be `.csv` — readers accept both).
+    labels per run; pre-migration runs may still be `.csv` — readers accept both). First-order
+    (`SPARTA_ORDER=1`) runs live beside them under `<tag>_o1/` and `{type}_o1_static_*`.
   - `results/windows/<tag>/` — prebuilt per-tag window store (`$VSC_SCRATCH/SPaRTA/windows/<tag>`
     on VSC; see `resolve_window_store_dir`). Transient — rebuild with `build_windows.slurm`.
   - `results/pickle/` — batched rendered images (`nodes_<i>.pkl` + `images_tensor_<i>.h5`).
@@ -181,7 +202,8 @@ time-windowed (snapshot) construction with optional exponential time-decay ("ech
   `measure_XY_function`s in [src/methods/utils/measure_functions.py](src/methods/utils/measure_functions.py),
   `node_selection` in [neighbourhood_functions.py](src/methods/utils/neighbourhood_functions.py),
   and `gargaml_node_measures` in [neighbourhood_picture.py](src/methods/neighbourhood_picture.py)
-  must remain bit-exact — don't refactor or change their numeric outputs. Adding new
+  must remain bit-exact — don't refactor or change their numeric outputs. (`node_measures` itself is
+  not frozen: its `radius` argument, default 2, is what the first-order baseline uses.) Adding new
   measures, summaries, or columns alongside them is fine (e.g. `summary_functions.py`
   and `transaction_measures` are SPaRTA-side and freely extensible).
 - **Don't commit data, results, notebooks, or generated images.** `.gitignore`

@@ -38,6 +38,13 @@ def pred_name(txt):
     return (m.group(1) if m else base[:-len(".txt")]) + ".parquet"
 
 
+# First-order (SPARTA_ORDER=1) dumps carry an `_o1` infix before _K{K} (dynamic) or after the
+# dataset type (static). They are reported as their own families so the order-2 counts stay
+# comparable to before.
+ORDER1 = " [order 1]"
+_ORDER1_RE = re.compile(r"_o1_K\d+_(?:nowcast|forecast)_|_o1_features_|_o1_CNN\.txt$")
+
+
 if __name__ == "__main__":
     show = "--list" in sys.argv
     have = {os.path.basename(p) for p in glob.glob(f"{PRED_DIR}/*.parquet")}
@@ -49,13 +56,14 @@ if __name__ == "__main__":
             continue
         for label, pat in FAMILIES:
             if re.search(pat, base):
-                total[label].add(pred_name(txt))
+                key = label + ORDER1 if _ORDER1_RE.search(base) else label
+                total[key].add(pred_name(txt))
                 if pred_name(txt) not in have:
-                    missing[label].add(pred_name(txt))
+                    missing[key].add(pred_name(txt))
                 break
-    for label, _ in FAMILIES:
+    for label in [l for l, _ in FAMILIES] + [l + ORDER1 for l, _ in FAMILIES if total[l + ORDER1]]:
         n, miss = len(total[label]), missing[label]
-        print(f"{label:26s} {n - len(miss):4d}/{n:<4d} have predictions")
+        print(f"{label:36s} {n - len(miss):4d}/{n:<4d} have predictions")
         if show:
             for name in sorted(miss):
                 print(f"    missing: {name}")

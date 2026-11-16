@@ -19,4 +19,8 @@ dataset=$2
 shift 2
 
 base=$(basename "$script" .slurm)
-exec sbatch --job-name="${base}_${dataset}" "$@" "$script" "$dataset"
+# SPARTA_ORDER=1 (first-order baseline) is forwarded by sbatch's default --export=ALL; mark the
+# job name too, so squeue / notification emails tell the two sweeps apart.
+order_tag=""
+[[ "${SPARTA_ORDER:-2}" == "1" ]] && order_tag="_o1"
+exec sbatch --job-name="${base}_${dataset}${order_tag}" "$@" "$script" "$dataset"

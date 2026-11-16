@@ -39,6 +39,7 @@ export SPARTA_WALL_MARGIN_S=${SPARTA_WALL_MARGIN_S:-7200}   # override per submi
 
 # Dataset from the submission argument (or SPARTA_DATASET via --export).
 source slurm/sweep_common.sh
+require_order2 "train_cnn.slurm (the CNN reads the 3x3 SPaRTA picture)"
 resolve_dataset_arg "${1:-}"
 echo "[$(date)] CNN+Optuna for SPARTA_DATASET=$SPARTA_DATASET on $(nvidia-smi -L 2>/dev/null | head -1)"
 

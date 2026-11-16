@@ -23,7 +23,7 @@ from src.utils.setup import (load_config, resolve_dataset, resolve_timing,
                              resolve_storage, make_pruner,
                              resolve_ts_cache_dir,
                              resolve_window_store_dir, require_prebuilt_windows,
-                             resolve_rescore)
+                             resolve_rescore, require_default_order)
 from src.data.sequence_data import (build_sequence_windows, temporal_split,
                                      fit_scaler_compact, apply_scaler_compact)
 from src.methods.models import (LSTMClassifier, TransformerClassifier, FrameEncoder,
@@ -56,6 +56,7 @@ def make_model(arch, params, n_features):
 
 
 if __name__ == "__main__":
+    require_default_order("experiment_CNN_LSTM.py", "The per-frame CNN encoder reads the 3x3 SPaRTA picture.")
     device = torch.device("cuda" if torch.cuda.is_available()
                           else "mps" if torch.backends.mps.is_available() else "cpu")
     print(f"Training on: {device}")
