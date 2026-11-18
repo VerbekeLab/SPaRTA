@@ -18,6 +18,7 @@ env/
 /res/
 /results/
 /results-old/
+/results_figures/
 
 # Slurm job logs (job outputs land there on the cluster; local copies for debugging)
 slurm/logs/
