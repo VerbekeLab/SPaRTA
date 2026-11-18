@@ -1,10 +1,10 @@
 #!/bin/bash -l
-# F1@0.5, best-F1 and precision@100 for every saved test-prediction table (all datasets, timing
-# combos, K, task) -> results/experiments/extra_metrics.csv. Reads results/predictions/*.parquet
-# (written by the training jobs, or backfilled with SPARTA_RESCORE=1 -- see slurm/README.md); no
-# training. Run after the tables exist:
+# F1@0.5, best-F1 and precision@100 / recall@100 / F1@100 for every saved test-prediction table (all
+# datasets, timing combos, K, task) -> results/experiments/extra_metrics.csv. Reads
+# results/predictions/*.parquet (written by the training jobs, or backfilled with SPARTA_RESCORE=1 --
+# see slurm/README.md); no training. Run after the tables exist:
 #   sbatch slurm/extra_metrics.slurm
-# Extra flags go to the script, e.g. add P@500 and R-precision:
+# Extra flags go to the script, e.g. add k = 500 (P@500, R@500, F1@500) and R-precision:
 #   sbatch slurm/extra_metrics.slurm --ks 100,500 --r-precision
 # CPU only; memory is set by the largest table (AMLWorld: a few million rows x a few models).
 

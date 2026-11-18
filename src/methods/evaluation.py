@@ -158,27 +158,71 @@ def compare_to_metrics(txt_glob, scores_dict, y_true, tol=1e-4):
 
 
 # --- Threshold / top-k metrics (computed from saved predictions, never inside a training job) --
-# AUC-PR stays the primary metric. These two views complement it: precision@k is the analyst-
-# workload view (of the k accounts a model flags first, how many are laundering), and F1 is the
-# single-operating-point view.
+# AUC-PR stays the primary metric. These views complement it. The top-k family is the analyst-
+# workload view: flag the k highest-scored accounts, then ask how many of them are laundering
+# (precision@k), how many of all laundering accounts that catches (recall@k), and the harmonic
+# mean of the two (F1@k = 2 hits / (k + positives)). All three are monotone in `hits`, so within
+# one test band they rank models identically; they differ across bands through the number of
+# positives. F1 at a score threshold (f1_at_threshold, best_f1) is the single-operating-point view.
 
-def precision_at_k(y_true, scores, k):
-    """Precision among the k highest-scored rows. `k` is a count (int >= 1) or a fraction of the
-    test rows (float in (0, 1), rounded up). Ties at the cut-off score are resolved in
-    EXPECTATION (the tied rows contribute their mean label for the slots they fill) instead of by
-    row order: probabilities saturate at 0/1 often enough that row order, which is just anchor
-    order, would otherwise decide the number. Returns NaN when k exceeds the number of rows."""
-    y = np.asarray(y_true, dtype=float)
-    s = np.asarray(scores, dtype=float)
+def _resolve_k(k, n):
+    """`k` as a row count: an int >= 1, or a fraction of the `n` test rows (float in (0, 1)), rounded up."""
+    return int(np.ceil(k * n)) if isinstance(k, float) and 0 < k < 1 else int(k)
+
+
+def _hits_at_k(y, s, k):
+    """(hits, k): the number of positives among the k highest-scored rows, with the count as a float
+    and `k` resolved to a row count. Ties at the cut-off score are resolved in EXPECTATION (the tied
+    rows contribute their mean label for the slots they fill) instead of by row order: probabilities
+    saturate at 0/1 often enough that row order, which is just anchor order, would otherwise decide
+    the number. `hits` is NaN when k is below 1 or exceeds the number of rows."""
     n = len(y)
-    k = int(np.ceil(k * n)) if isinstance(k, float) and 0 < k < 1 else int(k)
+    k = _resolve_k(k, n)
     if k < 1 or k > n:
-        return float("nan")
+        return float("nan"), k
     cutoff = np.partition(s, n - k)[n - k]          # k-th largest score
     above = s > cutoff
     tied = s == cutoff
     slots = k - int(above.sum())                    # how many cut-off-tied rows make the top k
-    return float((y[above].sum() + slots * y[tied].mean()) / k)
+    return float(y[above].sum() + slots * y[tied].mean()), k
+
+
+def topk_metrics(y_true, scores, k):
+    """(precision, recall, F1) of flagging the k highest-scored rows, from ONE ranking pass. `k` is a
+    count (int >= 1) or a fraction of the test rows (float in (0, 1), rounded up). All NaN when k
+    exceeds the number of rows; recall and F1 are NaN when there are no positives. With hits the
+    positives among the flagged rows and `pos` all positives: precision = hits / k, recall =
+    hits / pos, F1 = 2 hits / (k + pos). Ceilings (what a perfect ranking scores): precision
+    min(1, pos / k), recall min(1, k / pos), F1 2 min(k, pos) / (k + pos)."""
+    y = np.asarray(y_true, dtype=float)
+    s = np.asarray(scores, dtype=float)
+    hits, k = _hits_at_k(y, s, k)
+    if np.isnan(hits):
+        return float("nan"), float("nan"), float("nan")
+    pos = float(y.sum())
+    if pos == 0:
+        return hits / k, float("nan"), float("nan")
+    return hits / k, hits / pos, 2 * hits / (k + pos)
+
+
+def precision_at_k(y_true, scores, k):
+    """Precision among the k highest-scored rows (see topk_metrics for `k` and the tie rule). NaN
+    when k exceeds the number of rows."""
+    return topk_metrics(y_true, scores, k)[0]
+
+
+def recall_at_k(y_true, scores, k):
+    """Share of all positives among the k highest-scored rows (see topk_metrics). NaN when k exceeds
+    the number of rows or there are no positives. Equals precision_at_k * k / positives."""
+    return topk_metrics(y_true, scores, k)[1]
+
+
+def f1_at_k(y_true, scores, k):
+    """F1 of the rule 'flag the k highest-scored rows': 2 hits / (k + positives), the harmonic mean
+    of precision_at_k and recall_at_k (see topk_metrics). A fixed budget rather than a fixed score
+    cut-off, so it needs no calibrated scores (unlike f1_at_threshold) and never exceeds best_f1.
+    NaN when k exceeds the number of rows or there are no positives."""
+    return topk_metrics(y_true, scores, k)[2]
 
 
 def best_f1(y_true, scores):
@@ -210,22 +254,28 @@ def f1_at_threshold(y_true, scores, threshold=0.5):
     return 2 * tp / denom if denom else 0.0
 
 
-def _k_label(k):
-    return f"P@{k * 100:g}%" if isinstance(k, float) and 0 < k < 1 else f"P@{int(k)}"
+def _k_label(k, prefix="P"):
+    """'P@100' for a count, 'P@1%' for a fraction of the test rows; `prefix` is 'P', 'R' or 'F1'."""
+    return f"{prefix}@{k * 100:g}%" if isinstance(k, float) and 0 < k < 1 else f"{prefix}@{int(k)}"
 
 
 def extra_metrics(y_true, scores, ks=(100,), fracs=(), r_precision=False):
-    """One flat dict per model: F1 at the fixed 0.5 cut-off ('F1@0.5'), best-F1 (oracle, see
-    best_f1), plus precision@k for each count in `ks`, each fraction in `fracs` (e.g. 'P@1%'),
-    and, if `r_precision`, P@R (k = number of positives). Defaults: P@100 only. Counts above
-    the number of test rows come back NaN."""
+    """One flat dict per model: F1 at the fixed 0.5 SCORE cut-off ('F1@0.5'), best-F1 (oracle, see
+    best_f1), plus, for each count in `ks` and each fraction in `fracs` (e.g. 'P@1%'), the top-k
+    triple precision / recall / F1: 'P@k', 'R@k', 'F1@k' (see topk_metrics; 'F1@100' flags the 100
+    highest-scored rows, unlike 'F1@0.5', which flags every score >= 0.5). If `r_precision`, also
+    P@R (k = number of positives; recall and F1 at that k are the same number, so no R@R / F1@R).
+    Defaults: k = 100 only. Counts above the number of test rows come back NaN."""
     y = np.asarray(y_true)
     bf = best_f1(y, scores)
     out = {"F1@0.5": f1_at_threshold(y, scores, 0.5),
            "F1_best": bf["F1"], "F1_best_threshold": bf["threshold"],
            "F1_best_precision": bf["precision"], "F1_best_recall": bf["recall"]}
-    for k in list(ks) + [float(f) for f in fracs]:
-        out[_k_label(k)] = precision_at_k(y, scores, k)
+    all_k = list(ks) + [float(f) for f in fracs]
+    topk = {k: topk_metrics(y, scores, k) for k in all_k}               # one ranking pass per k
+    for i, prefix in enumerate(("P", "R", "F1")):
+        for k in all_k:
+            out[_k_label(k, prefix)] = topk[k][i]
     if r_precision:
         out["P@R"] = precision_at_k(y, scores, int(y.sum()))
     return out

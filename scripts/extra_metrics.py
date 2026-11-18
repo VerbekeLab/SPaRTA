@@ -1,6 +1,6 @@
-# Extra test metrics -- F1 at the 0.5 cut-off, best-F1 and precision@k -- computed OFFLINE from the saved per-row test
-# scores in results/predictions/*.parquet (written by every experiment script, or backfilled with
-# SPARTA_RESCORE=1; see slurm/README.md). Nothing is retrained. Writes one tidy table with the
+# Extra test metrics -- F1 at the 0.5 cut-off, best-F1 and the top-k trio precision@k / recall@k / F1@k -- computed
+# OFFLINE from the saved per-row test scores in results/predictions/*.parquet (written by every experiment script,
+# or backfilled with SPARTA_RESCORE=1; see slurm/README.md). Nothing is retrained. Writes one tidy table with the
 # same key columns as results/experiments/summary.csv, so the two merge on
 # (dataset, run_tag, K, task, model, split):
 #   results/experiments/extra_metrics.csv
@@ -9,8 +9,12 @@
 # probabilities; arbitrary for IsolationForest's anomaly scores, which are not on that scale).
 # F1_best is the MAXIMUM F1 over thresholds on the test band ("F1_best", with its threshold /
 # precision / recall): an oracle operating point, optimistic, and not a deployable F1 -- see
-# evaluation.best_f1. precision@k defaults to k=100 only; --ks / --fracs (fractions of the test
-# rows) / --r-precision (k = #positives) add more. Counts above the test size are NaN.
+# evaluation.best_f1.
+# The top-k trio flags the k highest-scored accounts: P@k = share of them that launder, R@k = share of ALL laundering
+# accounts they catch, F1@k = 2 hits / (k + positives), their harmonic mean. Do not confuse F1@100 (top 100
+# flagged) with F1@0.5 (score >= 0.5). k defaults to 100 only; --ks (counts) / --fracs (fractions of the test
+# rows) add more, each giving all three columns; --r-precision adds P@R (k = #positives; R and F1 at that k are the
+# same number). Counts above the test size are NaN. See evaluation.topk_metrics for the ceilings.
 #
 # Run from the repo root: python scripts/extra_metrics.py [--ks 100,500] [--fracs 0.01] [--r-precision]
 import os
@@ -77,9 +81,9 @@ def main(ks, fracs, r_precision):
 
 if __name__ == "__main__":
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0] if __doc__ else None)
-    ap.add_argument("--ks", default="100", help="comma-separated counts for precision@k")
+    ap.add_argument("--ks", default="100", help="comma-separated counts k for precision@k, recall@k and F1@k")
     ap.add_argument("--fracs", default="",
-                    help="comma-separated fractions of the test rows for precision@k")
+                    help="comma-separated fractions of the test rows for precision@k, recall@k and F1@k")
     ap.add_argument("--r-precision", action="store_true", help="also report P@R (k = number of positives)")
     a = ap.parse_args()
     main(ks=[int(x) for x in a.ks.split(",") if x], fracs=[float(x) for x in a.fracs.split(",") if x],

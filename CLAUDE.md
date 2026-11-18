@@ -178,8 +178,11 @@ time-windowed (snapshot) construction with optional exponential time-decay ("ech
     ROC/PR arrays in the metrics `.txt` are truncated by numpy and unusable. Finished cells that predate
     this are backfilled with `SPARTA_RESCORE=1` on the same job (no tuning/training; see
     `slurm/README.md`); `scripts/missing_predictions.py` lists what is still missing.
-    `scripts/extra_metrics.py` derives F1@0.5, best-F1 (oracle threshold) and precision@k from them into
-    `results/experiments/extra_metrics.csv`; the metric functions live in `evaluation.py`.
+    `scripts/extra_metrics.py` derives F1@0.5 (score cut-off), best-F1 (oracle threshold) and the top-k trio
+    precision@k / recall@k / F1@k from them into `results/experiments/extra_metrics.csv`; the metric functions
+    live in `evaluation.py`. `F1@k` flags the k highest-scored rows (`2 hits / (k + positives)`), so it is not
+    `F1@0.5`; R@k and F1@k are capped at `k / positives` and `2 min(k, positives) / (k + positives)`, P@k at
+    `positives / k`. [tests/test_topk_metrics.py](tests/test_topk_metrics.py) checks them.
 - **Class imbalance:** `BCEWithLogitsLoss(pos_weight=...)` with the empirical
   negative/positive ratio (sometimes scaled). Don't substitute focal loss etc. silently.
 - **No `_t` suffix on feature files.** Feature/label files are `<type>_static_…` / `<type>_dynamic_{i}_…`

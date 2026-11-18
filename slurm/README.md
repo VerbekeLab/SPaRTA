@@ -257,8 +257,13 @@ between models) is then an offline calculation on those tables. The ROC/PR array
 `python scripts/extra_metrics.py` turns the tables into `results/experiments/extra_metrics.csv` (same key
 columns as `summary.csv`): **F1@0.5** (fixed cut-off `score >= 0.5`; arbitrary for IsolationForest's
 anomaly scores), **best-F1** (max over thresholds on the test band, an oracle/optimistic operating
-point, not a deployable F1) with its threshold/precision/recall, and **precision@100** (`--ks`, `--fracs`,
-`--r-precision` add more). On VSC: `sbatch slurm/extra_metrics.slurm`.
+point, not a deployable F1) with its threshold/precision/recall, and the top-k trio **precision@100 /
+recall@100 / F1@100** (flag the 100 highest-scored accounts; `F1@100` is not `F1@0.5`, which flags every
+score >= 0.5). `--ks` (counts) and `--fracs` (fractions of the test rows) add more k, each giving all three
+columns (`P@500`, `R@500`, `F1@500`, `P@1%`, ...); `--r-precision` adds P@R (recall and F1 at k = #positives
+are the same number). A perfect ranking scores at most `positives / k` (precision), `k / positives` (recall)
+and `2 min(k, positives) / (k + positives)` (F1), so compare settings with different numbers of positives
+with care. On VSC: `sbatch slurm/extra_metrics.slurm`.
 Static runs write one table per dataset (`{type}_features.parquet`, `{type}_CNN.parquet`).
 
 Cells finished **before** this existed are backfilled with `SPARTA_RESCORE=1`: the same job, same
